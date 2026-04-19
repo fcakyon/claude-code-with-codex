@@ -3,6 +3,8 @@ import type { AnthropicRequest } from "./anthropic/schema.ts"
 import type { ResponsesRequest } from "./translate/request.ts"
 import { buildInstructions, normalizeContent, toolResultToString } from "./translate/request.ts"
 
+const IMAGE_TOKEN_ESTIMATE = 2000
+
 export function countTokens(req: AnthropicRequest): number {
   let total = 0
   const instructions = buildInstructions(req.system)
@@ -14,8 +16,7 @@ export function countTokens(req: AnthropicRequest): number {
       if (block.type === "text") {
         total += encode(block.text).length
       } else if (block.type === "image") {
-        const value = block.source.type === "url" ? block.source.url : `data:${block.source.media_type};base64,${block.source.data}`
-        total += encode(value).length
+        total += IMAGE_TOKEN_ESTIMATE
       } else if (block.type === "tool_use") {
         total += encode(block.name).length
         total += encode(JSON.stringify(block.input ?? {})).length
@@ -35,7 +36,9 @@ export function countTokens(req: AnthropicRequest): number {
   return total
 }
 
-export function countTranslatedTokens(req: Pick<ResponsesRequest, "instructions" | "input" | "tools">): number {
+export function countTranslatedTokens(
+  req: Pick<ResponsesRequest, "instructions" | "input" | "tools" | "text" | "tool_choice">,
+): number {
   let total = 0
   if (req.instructions) total += encode(req.instructions).length
 
@@ -45,7 +48,7 @@ export function countTranslatedTokens(req: Pick<ResponsesRequest, "instructions"
         if (part.type === "input_text" || part.type === "output_text") {
           total += encode(part.text).length
         } else if (part.type === "input_image") {
-          total += encode(part.image_url).length
+          total += IMAGE_TOKEN_ESTIMATE
         }
       }
     } else if (item.type === "function_call") {
@@ -62,6 +65,18 @@ export function countTranslatedTokens(req: Pick<ResponsesRequest, "instructions"
     total += encode(tool.name).length
     if (tool.description) total += encode(tool.description).length
     total += encode(JSON.stringify(tool.parameters ?? {})).length
+  }
+
+  if (req.text?.format?.type === "json_schema") {
+    total += encode(req.text.format.name).length
+    total += encode(JSON.stringify(req.text.format.schema)).length
+  }
+
+  if (typeof req.tool_choice === "string") {
+    total += encode(req.tool_choice).length
+  } else if (req.tool_choice?.type === "function") {
+    total += encode(req.tool_choice.type).length
+    total += encode(req.tool_choice.name).length
   }
 
   total += req.input.length * 4

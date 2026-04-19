@@ -89,7 +89,9 @@ async function route(req: Request, url: URL, reqId: string): Promise<Response> {
 
   if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
     const body = (await req.json()) as AnthropicRequest
-    const tokens = countTokens(body)
+    const resolvedModel = resolveModel(body.model)
+    const translated = translateRequest({ ...body, model: resolvedModel })
+    const tokens = countTranslatedTokens(translated)
     const sessionId = req.headers.get("x-claude-code-session-id") || undefined
     const { state, sessionSeq } = nextSessionTimeline(sessionId)
     const messageCount = body.messages?.length ?? 0
@@ -112,6 +114,7 @@ async function route(req: Request, url: URL, reqId: string): Promise<Response> {
         sessionId,
         sessionSeq,
         model: body.model,
+        resolvedModel,
         tokens,
         messageCount,
         toolCount,
