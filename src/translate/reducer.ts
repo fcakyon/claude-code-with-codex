@@ -45,8 +45,28 @@ interface ToolState {
   name: string
   argsAccum: string
   hadDelta: boolean
+  bufferUntilDone: boolean
+  emittedArgs: boolean
 }
 type BlockState = TextState | ToolState
+
+function shouldBufferToolArgs(name: string): boolean {
+  return name === "Read"
+}
+
+function sanitizeToolArgs(name: string, args: string): string {
+  if (name !== "Read" || !args) return args
+  try {
+    const parsed = JSON.parse(args)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return args
+    if (!("pages" in parsed) || parsed.pages !== "") return args
+    const sanitized = { ...parsed }
+    delete sanitized.pages
+    return JSON.stringify(sanitized)
+  } catch {
+    return args
+  }
+}
 
 /**
  * Single source of truth for translating Codex Responses SSE into a
@@ -116,10 +136,13 @@ export async function* reduceUpstream(
           name: item.name,
           argsAccum: "",
           hadDelta: false,
+          bufferUntilDone: shouldBufferToolArgs(item.name),
+          emittedArgs: false,
         })
         yield { kind: "tool-start", index: idx, id: item.call_id, name: item.name }
         continue
       }
+
       continue
     }
 
@@ -147,7 +170,10 @@ export async function* reduceUpstream(
       if (!delta) continue
       state.argsAccum += delta
       state.hadDelta = true
-      yield { kind: "tool-delta", index: state.index, partialJson: delta }
+      if (!state.bufferUntilDone) {
+        state.emittedArgs = true
+        yield { kind: "tool-delta", index: state.index, partialJson: delta }
+      }
       continue
     }
 
@@ -172,14 +198,17 @@ export async function* reduceUpstream(
         continue
       }
       if (item.type === "reasoning") continue
-      if (state.kind === "tool" && !state.hadDelta) {
+      if (state.kind === "tool") {
         const finalArgs =
           (typeof item.arguments === "string" && item.arguments.length
             ? item.arguments
             : state.argsAccum) || ""
         if (finalArgs.length) {
-          state.argsAccum = finalArgs
-          yield { kind: "tool-delta", index: state.index, partialJson: finalArgs }
+          state.argsAccum = sanitizeToolArgs(state.name, finalArgs)
+          if (state.bufferUntilDone || !state.emittedArgs) {
+            state.emittedArgs = true
+            yield { kind: "tool-delta", index: state.index, partialJson: state.argsAccum }
+          }
         }
       }
       if (state.kind === "text") {
