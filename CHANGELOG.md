@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.0.9 (2026-05-03)
+
+- The server now prints the active config file path and configured overrides on startup, making it easier to confirm which settings are in effect.
+- Kimi debugging overrides now use `CCP_KIMI_OAUTH_HOST` and `CCP_KIMI_BASE_URL`, matching the proxy's `CCP_` environment variable naming.
+- The setup examples now recommend disabling Claude Code's non-streaming fallback to avoid duplicate tool calls after interrupted streams.
+
 ## v0.0.8 (2026-04-30)
 
 - Added exponential backoff retry on upstream 429 errors, respecting
