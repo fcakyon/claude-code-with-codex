@@ -205,12 +205,12 @@ export function kimiUserAgent(defaultValue: string): string {
 
 export function kimiOauthHost(): string {
   const c = getConfig()
-  return c.env.KIMI_OAUTH_HOST ?? c.file.kimi?.oauthHost ?? "https://auth.kimi.com"
+  return c.env.CCP_KIMI_OAUTH_HOST ?? c.file.kimi?.oauthHost ?? "https://auth.kimi.com"
 }
 
 export function kimiBaseUrl(): string {
   const c = getConfig()
-  return c.env.KIMI_BASE_URL ?? c.file.kimi?.baseUrl ?? "https://api.kimi.com/coding/v1"
+  return c.env.CCP_KIMI_BASE_URL ?? c.file.kimi?.baseUrl ?? "https://api.kimi.com/coding/v1"
 }
 
 // Additive: error/warn always go to stderr in log.ts; this getter only

@@ -1,7 +1,7 @@
 import { kimiBaseUrl, kimiOauthHost } from "../../../config.ts"
 
 export const CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
-// Read lazily so config.json values apply. KIMI_OAUTH_HOST / KIMI_BASE_URL
+// Read lazily so config.json values apply. CCP_KIMI_OAUTH_HOST / CCP_KIMI_BASE_URL
 // env vars still work (env wins over file in the getter).
 export function oauthHost(): string {
   return kimiOauthHost()

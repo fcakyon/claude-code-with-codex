@@ -472,8 +472,8 @@ directory the auth tokens use, deliberately not `~/Library`) and at
 | `XDG_STATE_HOME`       | —                   | `~/.local/state`                 | Base dir for `proxy.log`                                                                       |
 | `CCP_LOG_STDERR`       | `log.stderr`        | unset                            | Also mirror log lines to stderr                                                                |
 | `CCP_LOG_VERBOSE`      | `log.verbose`       | unset                            | Log full request/response bodies + every SSE event                                             |
-| `KIMI_OAUTH_HOST`      | `kimi.oauthHost`    | `https://auth.kimi.com`          | Override Kimi's OAuth host (debugging only)                                                    |
-| `KIMI_BASE_URL`        | `kimi.baseUrl`      | `https://api.kimi.com/coding/v1` | Override Kimi's API base URL                                                                   |
+| `CCP_KIMI_OAUTH_HOST`      | `kimi.oauthHost`    | `https://auth.kimi.com`          | Override Kimi's OAuth host (debugging only)                                                    |
+| `CCP_KIMI_BASE_URL`        | `kimi.baseUrl`      | `https://api.kimi.com/coding/v1` | Override Kimi's API base URL                                                                   |
 | `CCP_CODEX_MODEL`      | `codex.model`       | unset                            | Force all Codex requests to this model (`gpt-5.2`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`) |
 | `CCP_CODEX_EFFORT`     | `codex.effort`      | unset                            | Force all Codex requests to this reasoning effort (`none`, `low`, `medium`, `high`, `xhigh`)   |
 | `CCP_CODEX_ORIGINATOR` | `codex.originator`  | `claude-code-proxy`              | Override the `originator` header sent to Codex                                                 |

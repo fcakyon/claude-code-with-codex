@@ -141,8 +141,8 @@ describe("empty env-string compatibility", () => {
     expect(codexUserAgent("default-ua")).toBe("")
   })
 
-  it("empty KIMI_OAUTH_HOST env is a valid value (legacy ?? semantics)", () => {
-    setEnv({ KIMI_OAUTH_HOST: "" })
+  it("empty CCP_KIMI_OAUTH_HOST env is a valid value (legacy ?? semantics)", () => {
+    setEnv({ CCP_KIMI_OAUTH_HOST: "" })
     expect(kimiOauthHost()).toBe("")
   })
 

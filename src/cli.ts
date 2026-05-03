@@ -140,10 +140,10 @@ function printConfigSummary(): void {
   if (cfg.env.CCP_LOG_STDERR !== undefined) overrides.push("CCP_LOG_STDERR (env)")
   else if (fromFile.log?.stderr) overrides.push("log.stderr (config)")
 
-  if (cfg.env.KIMI_OAUTH_HOST) overrides.push("KIMI_OAUTH_HOST (env)")
+  if (cfg.env.CCP_KIMI_OAUTH_HOST) overrides.push("CCP_KIMI_OAUTH_HOST (env)")
   else if (fromFile.kimi?.oauthHost) overrides.push("kimi.oauthHost (config)")
 
-  if (cfg.env.KIMI_BASE_URL) overrides.push("KIMI_BASE_URL (env)")
+  if (cfg.env.CCP_KIMI_BASE_URL) overrides.push("CCP_KIMI_BASE_URL (env)")
   else if (fromFile.kimi?.baseUrl) overrides.push("kimi.baseUrl (config)")
 
   if (overrides.length > 0) {
