@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test"
 import { loadConfig } from "../../../config.ts"
 import type { AnthropicRequest } from "../../../anthropic/schema.ts"
-import { translateRequest } from "./request.ts"
-
+import { InvalidServiceTierError, translateRequest } from "./request.ts"
 const baseRequest: AnthropicRequest = {
   model: "claude-sonnet-4-6",
   messages: [{ role: "user", content: "hello" }],
@@ -46,9 +45,26 @@ describe("translateRequest", () => {
     expect(translated.service_tier).toBe("flex")
   })
 
+  it("uses model service tier when no override is set", () => {
+    loadConfig({ env: {}, forceReload: true })
+
+    const translated = translateRequest(baseRequest, { serviceTier: "priority" })
+
+    expect(translated.service_tier).toBe("priority")
+  })
+
+  it("service tier override takes precedence over model service tier", () => {
+    loadConfig({ env: { CCP_CODEX_SERVICE_TIER: "flex" }, forceReload: true })
+
+    const translated = translateRequest(baseRequest, { serviceTier: "priority" })
+
+    expect(translated.service_tier).toBe("flex")
+  })
+
   it("rejects invalid service tier overrides", () => {
     loadConfig({ env: { CCP_CODEX_SERVICE_TIER: "standard" }, forceReload: true })
 
+    expect(() => translateRequest(baseRequest)).toThrow(InvalidServiceTierError)
     expect(() => translateRequest(baseRequest)).toThrow('Invalid service tier override: "standard"')
   })
 

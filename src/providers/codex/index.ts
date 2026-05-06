@@ -1,11 +1,13 @@
 import type { AnthropicRequest } from "../../anthropic/schema.ts"
 import type { Provider, RequestContext, CliHandlers } from "../types.ts"
 import {
+  ALLOWED_MODELS,
   assertAllowedModel,
+  FAST_MODEL_ALIASES,
   ModelNotAllowedError,
-  resolveModel,
+  resolveModelRequest,
 } from "./translate/model-allowlist.ts"
-import { translateRequest } from "./translate/request.ts"
+import { InvalidServiceTierError, translateRequest } from "./translate/request.ts"
 import { translateStream } from "./translate/stream.ts"
 import { accumulateResponse, UpstreamStreamError } from "./translate/accumulate.ts"
 import { mapUsageToAnthropic } from "./translate/reducer.ts"
@@ -82,10 +84,29 @@ function jsonError(status: number, type: string, message: string): Response {
   })
 }
 
+function invalidServiceTierResponse(err: InvalidServiceTierError): Response {
+  return jsonError(400, "invalid_request_error", err.message)
+}
+
 async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
   const log = ctx.childLogger("provider.codex")
-  const resolvedModel = resolveModel(body.model)
-  const translated = translateRequest({ ...body, model: resolvedModel })
+  const resolved = resolveModelRequest(body.model)
+  const resolvedModel = resolved.model
+  let translated
+  try {
+    assertAllowedModel(resolvedModel)
+    translated = translateRequest({ ...body, model: resolvedModel }, { serviceTier: resolved.serviceTier })
+  } catch (err) {
+    if (err instanceof ModelNotAllowedError) {
+      return jsonError(
+        400,
+        "invalid_request_error",
+        `Model "${body.model}" resolves to unsupported model "${err.model}"`,
+      )
+    }
+    if (err instanceof InvalidServiceTierError) return invalidServiceTierResponse(err)
+    throw err
+  }
   const tokens = countTranslatedTokens(translated)
   const messageCount = body.messages?.length ?? 0
   const toolCount = body.tools?.length ?? 0
@@ -141,10 +162,16 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
   })
   if (logVerbose()) log.debug("anthropic request body", { body })
 
-  const resolvedModel = resolveModel(body.model)
+  const resolved = resolveModelRequest(body.model)
+  const resolvedModel = resolved.model
 
+  let translated
   try {
     assertAllowedModel(resolvedModel)
+    translated = translateRequest(
+      { ...body, model: resolvedModel },
+      { sessionId: ctx.sessionId, serviceTier: resolved.serviceTier },
+    )
   } catch (err) {
     if (err instanceof ModelNotAllowedError) {
       return jsonError(
@@ -153,10 +180,9 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
         `Model "${body.model}" resolves to unsupported model "${err.model}"`,
       )
     }
+    if (err instanceof InvalidServiceTierError) return invalidServiceTierResponse(err)
     throw err
   }
-
-  const translated = translateRequest({ ...body, model: resolvedModel }, { sessionId: ctx.sessionId })
   const localInputTokens = logVerbose() ? countTokens(body) : undefined
   const translatedInputTokens = logVerbose() ? countTranslatedTokens(translated) : undefined
   if (state) {
@@ -361,7 +387,7 @@ const cli: CliHandlers = {
 
 export const codexProvider: Provider = {
   name: "codex",
-  supportedModels: new Set(["gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"]),
+  supportedModels: new Set([...ALLOWED_MODELS, ...FAST_MODEL_ALIASES]),
   handleMessages,
   handleCountTokens,
   cli,

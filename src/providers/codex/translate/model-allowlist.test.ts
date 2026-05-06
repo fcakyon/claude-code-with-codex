@@ -2,7 +2,7 @@ import { describe, expect, it, afterEach } from "bun:test"
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { resolveModel } from "./model-allowlist.ts"
+import { resolveModel, resolveModelRequest } from "./model-allowlist.ts"
 import { loadConfig } from "../../../config.ts"
 
 afterEach(() => {
@@ -52,5 +52,26 @@ describe("resolveModel", () => {
   it("empty env and no file value falls through to alias", () => {
     loadConfig({ env: { CCP_CODEX_MODEL: "" }, forceReload: true })
     expect(resolveModel("sonnet")).toBe("gpt-5.4")
+  })
+
+  it("detects fast model aliases", () => {
+    loadConfig({ env: {}, forceReload: true })
+    expect(resolveModelRequest("gpt-5.4-fast")).toEqual({
+      model: "gpt-5.4",
+      serviceTier: "priority",
+    })
+  })
+
+  it("model override preserves fast model alias service tier", () => {
+    loadConfig({ env: { CCP_CODEX_MODEL: "gpt-5.5" }, forceReload: true })
+    expect(resolveModelRequest("gpt-5.4-fast")).toEqual({
+      model: "gpt-5.5",
+      serviceTier: "priority",
+    })
+  })
+
+  it("does not strip unsupported fast-looking model names", () => {
+    loadConfig({ env: {}, forceReload: true })
+    expect(resolveModelRequest("gpt-4.1-fast")).toEqual({ model: "gpt-4.1-fast" })
   })
 })

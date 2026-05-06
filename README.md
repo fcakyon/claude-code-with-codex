@@ -88,7 +88,7 @@ upstream for each request is chosen from `ANTHROPIC_MODEL`.
 
 `ANTHROPIC_MODEL` selects the provider:
 
-- `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.4-mini`, `gpt-5.2` → **codex**
+- `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.4-mini`, `gpt-5.2` → **codex**
 - `kimi-for-coding`, `kimi-k2.6`, `k2.6` → **kimi**
 
 An unknown model returns a 400 listing the supported ids. There is no
@@ -217,6 +217,11 @@ the change immediately; existing sessions keep whatever they started with.
 Upstream: `https://chatgpt.com/backend-api/codex/responses` (Responses API).
 
 Set `ANTHROPIC_MODEL` to a model your ChatGPT subscription is allowed to use.
+Append `-fast` to a Codex model name to request Codex fast mode for that request
+without restarting the proxy. For example, `gpt-5.4-fast[1m]` is sent upstream as
+model `gpt-5.4` with `service_tier: "priority"`. An explicit
+`codex.serviceTier` / `CCP_CODEX_SERVICE_TIER` override still takes precedence.
+
 Confirmed working on **Plus**:
 
 - `gpt-5.4`
@@ -475,9 +480,9 @@ directory the auth tokens use, deliberately not `~/Library`) and at
 | `CCP_LOG_VERBOSE`        | `log.verbose`       | unset                            | Log full request/response bodies + every SSE event                                             |
 | `CCP_KIMI_OAUTH_HOST`    | `kimi.oauthHost`    | `https://auth.kimi.com`          | Override Kimi's OAuth host (debugging only)                                                    |
 | `CCP_KIMI_BASE_URL`      | `kimi.baseUrl`      | `https://api.kimi.com/coding/v1` | Override Kimi's API base URL                                                                   |
-| `CCP_CODEX_MODEL`        | `codex.model`       | unset                            | Force all Codex requests to this model (`gpt-5.2`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`) |
+| `CCP_CODEX_MODEL`        | `codex.model`       | unset                            | Force all Codex requests to this model (`gpt-5.2`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`) |
 | `CCP_CODEX_EFFORT`       | `codex.effort`      | unset                            | Force all Codex requests to this reasoning effort (`none`, `low`, `medium`, `high`, `xhigh`)   |
-| `CCP_CODEX_SERVICE_TIER` | `codex.serviceTier` | unset                            | Force all Codex requests to this service tier (`fast`, `priority`, `flex`)                     |
+| `CCP_CODEX_SERVICE_TIER` | `codex.serviceTier` | unset                            | Force all Codex requests to this service tier (`fast`/`priority`, `flex`; `fast` is sent upstream as `priority`) |
 | `CCP_CODEX_ORIGINATOR`   | `codex.originator`  | `claude-code-proxy`              | Override the `originator` header sent to Codex                                                 |
 | `CCP_CODEX_USER_AGENT`   | `codex.userAgent`   | `claude-code-proxy/<version>`    | Override the `User-Agent` header sent to Codex                                                 |
 | `CCP_KIMI_USER_AGENT`    | `kimi.userAgent`    | `KimiCLI/1.37.0`                 | Override the `User-Agent` header sent to Kimi                                                  |

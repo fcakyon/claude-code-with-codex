@@ -11,6 +11,15 @@ import { codexEffort, codexServiceTier } from "../../../config.ts"
 export type Effort = "none" | "low" | "medium" | "high" | "xhigh"
 export type ServiceTier = "priority" | "flex"
 
+export class InvalidServiceTierError extends Error {
+  constructor(public serviceTier: string) {
+    super(
+      `Invalid service tier override: "${serviceTier}". Must be one of: ${Array.from(VALID_SERVICE_TIERS).join(", ")}`,
+    )
+    this.name = "InvalidServiceTierError"
+  }
+}
+
 // Keep this aligned to the upstream Codex ResponsesApiRequest field set.
 // Do not add plausible-looking top-level fields without source support or a confirmed live test.
 export interface ResponsesRequest {
@@ -73,6 +82,7 @@ export interface ResponsesTool {
 
 export interface TranslateOptions {
   sessionId?: string
+  serviceTier?: ServiceTier
 }
 
 const VALID_EFFORTS = new Set<Effort>(["none", "low", "medium", "high", "xhigh"])
@@ -109,15 +119,17 @@ function resolveEffort(effort?: Effort): Effort | undefined {
   return override as Effort
 }
 
-function resolveServiceTier(): ServiceTier | undefined {
-  const tier = codexServiceTier()
-  if (tier === undefined) return undefined
+function normalizeServiceTier(tier: string): ServiceTier {
   if (!VALID_SERVICE_TIERS.has(tier)) {
-    throw new Error(
-      `Invalid service tier override: "${tier}". Must be one of: ${Array.from(VALID_SERVICE_TIERS).join(", ")}`,
-    )
+    throw new InvalidServiceTierError(tier)
   }
   return tier === "flex" ? "flex" : "priority"
+}
+
+function resolveServiceTier(modelServiceTier?: ServiceTier): ServiceTier | undefined {
+  const tier = codexServiceTier()
+  if (tier === undefined) return modelServiceTier
+  return normalizeServiceTier(tier)
 }
 
 export function translateRequest(req: AnthropicRequest, opts: TranslateOptions = {}): ResponsesRequest {
@@ -148,7 +160,7 @@ export function translateRequest(req: AnthropicRequest, opts: TranslateOptions =
   if (instructions) out.instructions = instructions
   if (tools && tools.length) out.tools = tools
   if (opts.sessionId) out.prompt_cache_key = opts.sessionId
-  const serviceTier = resolveServiceTier()
+  const serviceTier = resolveServiceTier(opts.serviceTier)
   if (serviceTier) out.service_tier = serviceTier
   assertValidEffort(req.output_config?.effort)
   const effort = resolveEffort(toCodexEffort(req.output_config?.effort))

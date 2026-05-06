@@ -5,6 +5,8 @@
 - Added `codex.serviceTier` / `CCP_CODEX_SERVICE_TIER` to request Codex service
   tiers. The Codex-style `fast` value is sent upstream as `priority`, matching
   the first-party Codex client.
+- Added `-fast` Codex model aliases such as `gpt-5.4-fast[1m]`, which request
+  fast mode per request without restarting the proxy.
 
 ## v0.0.9 (2026-05-03)
 

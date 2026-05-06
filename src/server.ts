@@ -105,7 +105,7 @@ function buildCtx(req: Request, reqId: string, providerName: string): RequestCon
 // window. Claude Code normalizes this away before sending requests to
 // the API, but we strip it here too as defense-in-depth in case a
 // future version or a different client includes it.
-function normalizeIncomingModel(model: string): string {
+export function normalizeIncomingModel(model: string): string {
   return model.replace(/\[1m\]$/i, "")
 }
 
