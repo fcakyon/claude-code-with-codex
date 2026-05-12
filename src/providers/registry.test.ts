@@ -44,6 +44,12 @@ describe("provider routing", () => {
     }
   })
 
+  it("lets session affinity override the global alias provider", () => {
+    loadConfig({ env: {}, forceReload: true })
+
+    expect(providerForModel("sonnet", "kimi")?.name).toBe("kimi")
+  })
+
   it("routes aliases to Codex when config file selects Codex", () => {
     const dir = mkdtempSync(join(tmpdir(), "ccp-alias-provider-"))
     const path = join(dir, "config.json")

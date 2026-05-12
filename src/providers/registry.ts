@@ -1,4 +1,4 @@
-import { aliasProvider } from "../config.ts"
+import { aliasProvider, type AliasProvider } from "../config.ts"
 import type { Provider } from "./types.ts"
 import { codexProvider } from "./codex/index.ts"
 import { kimiProvider } from "./kimi/index.ts"
@@ -36,8 +36,11 @@ export function allProviders(): Provider[] {
   return Object.values(PROVIDERS)
 }
 
-export function providerForModel(model: string): Provider | undefined {
-  if (ANTHROPIC_STYLE_ALIASES.has(model)) return getProvider(aliasProvider())
+export function providerForModel(
+  model: string,
+  aliasProviderOverride?: AliasProvider,
+): Provider | undefined {
+  if (ANTHROPIC_STYLE_ALIASES.has(model)) return getProvider(aliasProviderOverride ?? aliasProvider())
   for (const p of allProviders()) {
     if (p.supportedModels.has(model)) return p
   }

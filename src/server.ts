@@ -1,8 +1,13 @@
 import { createLogger, logDir, REDACT_KEYS } from "./log.ts"
 
 import type { AnthropicRequest } from "./anthropic/schema.ts"
+import type { AliasProvider } from "./config.ts"
 import type { Provider, RequestContext } from "./providers/types.ts"
-import { allSupportedModels, providerForModel } from "./providers/registry.ts"
+import {
+  allSupportedModels,
+  ANTHROPIC_STYLE_ALIASES,
+  providerForModel,
+} from "./providers/registry.ts"
 
 const rootLog = createLogger("server")
 
@@ -10,13 +15,44 @@ export interface ServeOptions {
   port: number
 }
 
-const sessionSeqs = new Map<string, number>()
+interface SessionState {
+  seq: number
+  affinityProvider?: AliasProvider
+  lastSeen: number
+}
 
-function nextSessionSeq(sessionId?: string): number | undefined {
+const SESSION_IDLE_TTL_MS = 24 * 60 * 60 * 1000
+const MAX_SESSIONS = 10_000
+const sessions = new Map<string, SessionState>()
+
+function currentSession(sessionId: string | undefined, now = Date.now()): SessionState | undefined {
   if (!sessionId) return undefined
-  const seq = (sessionSeqs.get(sessionId) ?? 0) + 1
-  sessionSeqs.set(sessionId, seq)
-  return seq
+  const existing = sessions.get(sessionId)
+  if (existing && now - existing.lastSeen > SESSION_IDLE_TTL_MS) sessions.delete(sessionId)
+  const state = sessions.get(sessionId) ?? { seq: 0, lastSeen: now }
+  state.seq += 1
+  state.lastSeen = now
+  sessions.set(sessionId, state)
+  evictSessions(now)
+  return state
+}
+
+function evictSessions(now: number): void {
+  for (const [sessionId, state] of sessions) {
+    if (now - state.lastSeen > SESSION_IDLE_TTL_MS) sessions.delete(sessionId)
+  }
+  while (sessions.size > MAX_SESSIONS) {
+    let oldestSessionId: string | undefined
+    let oldestLastSeen = Infinity
+    for (const [sessionId, state] of sessions) {
+      if (state.lastSeen < oldestLastSeen) {
+        oldestSessionId = sessionId
+        oldestLastSeen = state.lastSeen
+      }
+    }
+    if (!oldestSessionId) return
+    sessions.delete(oldestSessionId)
+  }
 }
 
 export function startServer(opts: ServeOptions): { stop: () => void; port: number } {
@@ -67,9 +103,12 @@ async function route(req: Request, url: URL, reqId: string): Promise<Response> {
   if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
     const body = await parseJsonBody(req)
     if (body instanceof Response) return body
-    const provider = routeProvider(body, reqId)
+    const sessionId = req.headers.get("x-claude-code-session-id") || undefined
+    const session = currentSession(sessionId)
+    const provider = routeProvider(body, reqId, session?.affinityProvider)
     if (provider instanceof Response) return provider
-    const ctx = buildCtx(req, reqId, provider.name)
+    updateSessionAffinity(session, body.model, provider.name)
+    const ctx = buildCtx(req, reqId, provider.name, sessionId, session)
     ctx.childLogger("server").info("dispatch", { model: body.model })
     return provider.handleCountTokens(body, ctx)
   }
@@ -77,9 +116,12 @@ async function route(req: Request, url: URL, reqId: string): Promise<Response> {
   if (req.method === "POST" && url.pathname === "/v1/messages") {
     const body = await parseJsonBody(req)
     if (body instanceof Response) return body
-    const provider = routeProvider(body, reqId)
+    const sessionId = req.headers.get("x-claude-code-session-id") || undefined
+    const session = currentSession(sessionId)
+    const provider = routeProvider(body, reqId, session?.affinityProvider)
     if (provider instanceof Response) return provider
-    const ctx = buildCtx(req, reqId, provider.name)
+    updateSessionAffinity(session, body.model, provider.name)
+    const ctx = buildCtx(req, reqId, provider.name, sessionId, session)
     ctx.childLogger("server").info("dispatch", { model: body.model })
     return provider.handleMessages(body, ctx)
   }
@@ -87,9 +129,14 @@ async function route(req: Request, url: URL, reqId: string): Promise<Response> {
   return jsonError(404, "not_found", `No route for ${req.method} ${url.pathname}`)
 }
 
-function buildCtx(req: Request, reqId: string, providerName: string): RequestContext {
-  const sessionId = req.headers.get("x-claude-code-session-id") || undefined
-  const sessionSeq = nextSessionSeq(sessionId)
+function buildCtx(
+  req: Request,
+  reqId: string,
+  providerName: string,
+  sessionId: string | undefined,
+  session: SessionState | undefined,
+): RequestContext {
+  const sessionSeq = session?.seq
   const bindings = { reqId, sessionId, sessionSeq, provider: providerName }
   return {
     reqId,
@@ -109,7 +156,20 @@ export function normalizeIncomingModel(model: string): string {
   return model.replace(/\[1m\]$/i, "")
 }
 
-function routeProvider(body: AnthropicRequest, reqId: string): Provider | Response {
+function updateSessionAffinity(
+  session: SessionState | undefined,
+  model: string,
+  providerName: string,
+): void {
+  if (!session || ANTHROPIC_STYLE_ALIASES.has(model)) return
+  session.affinityProvider = providerName as AliasProvider
+}
+
+function routeProvider(
+  body: AnthropicRequest,
+  reqId: string,
+  sessionAliasProvider?: AliasProvider,
+): Provider | Response {
   if (!body.model) {
     return jsonError(
       400,
@@ -118,7 +178,7 @@ function routeProvider(body: AnthropicRequest, reqId: string): Provider | Respon
     )
   }
   body.model = normalizeIncomingModel(body.model)
-  const provider = providerForModel(body.model)
+  const provider = providerForModel(body.model, sessionAliasProvider)
   if (!provider) {
     rootLog.warn("unknown model", { reqId, model: body.model })
     return jsonError(
