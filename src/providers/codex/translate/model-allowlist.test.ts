@@ -2,8 +2,14 @@ import { describe, expect, it, afterEach } from "bun:test"
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { resolveModel, resolveModelRequest } from "./model-allowlist.ts"
+import {
+  ALLOWED_MODELS,
+  MODEL_ALIASES,
+  resolveModel,
+  resolveModelRequest,
+} from "./model-allowlist.ts"
 import { loadConfig } from "../../../config.ts"
+import { ANTHROPIC_STYLE_ALIASES } from "../../registry.ts"
 
 afterEach(() => {
   loadConfig({ forceReload: true })
@@ -73,5 +79,17 @@ describe("resolveModel", () => {
   it("does not strip unsupported fast-looking model names", () => {
     loadConfig({ env: {}, forceReload: true })
     expect(resolveModelRequest("gpt-4.1-fast")).toEqual({ model: "gpt-4.1-fast" })
+  })
+
+  it("resolves every shared Anthropic-style alias to an allowed model", () => {
+    loadConfig({ env: {}, forceReload: true })
+
+    for (const alias of ANTHROPIC_STYLE_ALIASES) {
+      expect(ALLOWED_MODELS.has(resolveModel(alias))).toBe(true)
+    }
+  })
+
+  it("keeps the shared alias routing set aligned with Codex model aliases", () => {
+    expect([...ANTHROPIC_STYLE_ALIASES].sort()).toEqual([...MODEL_ALIASES.keys()].sort())
   })
 })

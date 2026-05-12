@@ -9,8 +9,11 @@ import { configDir } from "./paths.ts"
 // from either env or the file are treated as "unset" so they fall through
 // to the next layer (matches existing CCP_CODEX_MODEL behavior).
 
+export type AliasProvider = "codex" | "kimi"
+
 export interface FileConfig {
   port?: number
+  aliasProvider?: AliasProvider
   codex?: {
     originator?: string
     userAgent?: string
@@ -57,6 +60,13 @@ function warnInvalid(key: string, expected: string, got: unknown): void {
   )
 }
 
+function parseAliasProvider(key: string, value: unknown): AliasProvider | undefined {
+  if (value === undefined) return undefined
+  if (value === "codex" || value === "kimi") return value
+  warnInvalid(key, '"codex" or "kimi"', value)
+  return undefined
+}
+
 function validate(raw: unknown): FileConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
   const r = raw as Record<string, unknown>
@@ -66,6 +76,8 @@ function validate(raw: unknown): FileConfig {
     if (typeof r.port === "number" && Number.isFinite(r.port)) out.port = r.port
     else warnInvalid("port", "number", r.port)
   }
+
+  out.aliasProvider = parseAliasProvider("aliasProvider", r.aliasProvider)
 
   const validateStringSection = <K extends "codex" | "kimi" | "log">(
     key: K,
@@ -209,6 +221,11 @@ export function codexServiceTier(): string | undefined {
 export function codexBaseUrl(defaultValue: string): string {
   const c = getConfig()
   return c.env.CCP_CODEX_BASE_URL ?? c.file.codex?.baseUrl ?? defaultValue
+}
+
+export function aliasProvider(): AliasProvider {
+  const c = getConfig()
+  return parseAliasProvider("CCP_ALIAS_PROVIDER", emptyOrUnset(c.env.CCP_ALIAS_PROVIDER)) ?? c.file.aliasProvider ?? "kimi"
 }
 
 export function kimiUserAgent(defaultValue: string): string {

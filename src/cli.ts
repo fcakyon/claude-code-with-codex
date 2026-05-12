@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { startServer } from "./server.ts"
 import { createLogger, logDir } from "./log.ts"
-import { port as configPort, getConfig } from "./config.ts"
+import { port as configPort, getConfig, aliasProvider as configAliasProvider } from "./config.ts"
 import { configDir } from "./paths.ts"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
@@ -35,10 +35,7 @@ async function main() {
     printConfigSummary()
     console.log()
     console.log("Providers are selected per-request by ANTHROPIC_MODEL:")
-    for (const p of allProviders()) {
-      const models = [...p.supportedModels].join(", ")
-      console.log(`  ${p.name}: ${models}`)
-    }
+    printSupportedModels()
     console.log()
     console.log("Configure Claude Code (pick a model from above):")
     console.log(`  export ANTHROPIC_BASE_URL="http://localhost:${port}"`)
@@ -108,6 +105,19 @@ Models:    ${models}
   process.exit(2)
 }
 
+function printSupportedModels(): void {
+  const groups = new Map<string, string[]>()
+  for (const { model, provider } of allSupportedModels()) {
+    const models = groups.get(provider) ?? []
+    models.push(model)
+    groups.set(provider, models)
+  }
+  for (const provider of listProviders()) {
+    const models = groups.get(provider) ?? []
+    console.log(`  ${provider}: ${models.join(", ")}`)
+  }
+}
+
 function printConfigSummary(): void {
   const cfg = getConfig()
   const fromFile = cfg.file
@@ -139,6 +149,9 @@ function printConfigSummary(): void {
 
   if (cfg.env.CCP_CODEX_BASE_URL) overrides.push("CCP_CODEX_BASE_URL (env)")
   else if (fromFile.codex?.baseUrl) overrides.push("codex.baseUrl (config)")
+
+  if (cfg.env.CCP_ALIAS_PROVIDER) overrides.push(`CCP_ALIAS_PROVIDER=${configAliasProvider()} (env)`)
+  else if (fromFile.aliasProvider) overrides.push(`aliasProvider=${fromFile.aliasProvider} (config)`)
 
   if (cfg.env.CCP_LOG_VERBOSE !== undefined) overrides.push("CCP_LOG_VERBOSE (env)")
   else if (fromFile.log?.verbose) overrides.push("log.verbose (config)")

@@ -11,6 +11,7 @@ import {
   codexEffort,
   codexServiceTier,
   codexBaseUrl,
+  aliasProvider,
   kimiUserAgent,
   kimiOauthHost,
   kimiBaseUrl,
@@ -47,6 +48,7 @@ describe("config defaults", () => {
     expect(codexEffort()).toBeUndefined()
     expect(codexServiceTier()).toBeUndefined()
     expect(codexBaseUrl("default-codex-url")).toBe("default-codex-url")
+    expect(aliasProvider()).toBe("kimi")
     expect(kimiUserAgent("default-kimi-ua")).toBe("default-kimi-ua")
     expect(kimiOauthHost()).toBe("https://auth.kimi.com")
     expect(kimiBaseUrl()).toBe("https://api.kimi.com/coding/v1")
@@ -88,6 +90,12 @@ describe("file overrides default", () => {
     expect(codexBaseUrl("default")).toBe(
       "http://127.0.0.1:2455/backend-api/codex/responses",
     )
+  })
+
+  it("aliasProvider from config.json", () => {
+    writeFileSync(configPath, JSON.stringify({ aliasProvider: "codex" }))
+    setEnv({})
+    expect(aliasProvider()).toBe("codex")
   })
 
   it("kimi.oauthHost from config.json", () => {
@@ -137,6 +145,12 @@ describe("env overrides file", () => {
     expect(codexBaseUrl("default")).toBe("http://127.0.0.1:2455/env")
   })
 
+  it("CCP_ALIAS_PROVIDER env wins over config", () => {
+    writeFileSync(configPath, JSON.stringify({ aliasProvider: "kimi" }))
+    setEnv({ CCP_ALIAS_PROVIDER: "codex" })
+    expect(aliasProvider()).toBe("codex")
+  })
+
   it("CCP_USER_AGENT env (generic fallback) is preferred over file", () => {
     writeFileSync(
       configPath,
@@ -170,6 +184,18 @@ describe("empty-string semantics", () => {
     writeFileSync(configPath, JSON.stringify({ codex: { serviceTier: "flex" } }))
     setEnv({ CCP_CODEX_SERVICE_TIER: "" })
     expect(codexServiceTier()).toBe("flex")
+  })
+
+  it("empty CCP_ALIAS_PROVIDER env falls through to file value", () => {
+    writeFileSync(configPath, JSON.stringify({ aliasProvider: "codex" }))
+    setEnv({ CCP_ALIAS_PROVIDER: "" })
+    expect(aliasProvider()).toBe("codex")
+  })
+
+  it("invalid CCP_ALIAS_PROVIDER env falls through to file value", () => {
+    writeFileSync(configPath, JSON.stringify({ aliasProvider: "codex" }))
+    setEnv({ CCP_ALIAS_PROVIDER: "openai" })
+    expect(aliasProvider()).toBe("codex")
   })
 
   it("empty PORT env falls through to file value", () => {
@@ -211,6 +237,12 @@ describe("malformed config", () => {
     setEnv({})
     expect(port()).toBe(18765)
     expect(codexUserAgent("default")).toBe("good")
+  })
+
+  it("ignores invalid aliasProvider values", () => {
+    writeFileSync(configPath, JSON.stringify({ aliasProvider: "openai" }))
+    setEnv({})
+    expect(aliasProvider()).toBe("kimi")
   })
 
   it("returns defaults when file is missing entirely", () => {

@@ -453,6 +453,7 @@ directory the auth tokens use, deliberately not `~/Library`) and at
 ```json
 {
   "port": 18765,
+  "aliasProvider": "kimi",
   "codex": {
     "originator": "claude-code-proxy",
     "userAgent": "claude-code-proxy/dev",
@@ -479,6 +480,7 @@ directory the auth tokens use, deliberately not `~/Library`) and at
 | `XDG_STATE_HOME`         | —                   | `~/.local/state`                                  | Base dir for `proxy.log`                                                                                         |
 | `CCP_LOG_STDERR`         | `log.stderr`        | unset                                             | Also mirror log lines to stderr                                                                                  |
 | `CCP_LOG_VERBOSE`        | `log.verbose`       | unset                                             | Log full request/response bodies + every SSE event                                                               |
+| `CCP_ALIAS_PROVIDER`     | `aliasProvider`     | `kimi`                                            | Route Anthropic-style aliases (`haiku`, `sonnet`, `opus`, `claude-*`) through `kimi` or `codex`                  |
 | `CCP_KIMI_OAUTH_HOST`    | `kimi.oauthHost`    | `https://auth.kimi.com`                           | Override Kimi's OAuth host (debugging only)                                                                      |
 | `CCP_KIMI_BASE_URL`      | `kimi.baseUrl`      | `https://api.kimi.com/coding/v1`                  | Override Kimi's API base URL                                                                                     |
 | `CCP_CODEX_MODEL`        | `codex.model`       | unset                                             | Force all Codex requests to this model (`gpt-5.2`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`)        |
