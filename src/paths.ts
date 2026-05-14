@@ -20,7 +20,7 @@ function windowsRoamingAppData(deps: DirResolverEnv): string {
 }
 
 function windowsLocalAppData(deps: DirResolverEnv): string {
-  return deps.env.LOCALAPPDATA || windowsRoamingAppData(deps)
+  return deps.env.LOCALAPPDATA || win32.join(deps.home, "AppData", "Local")
 }
 
 // macOS deliberately uses ~/.config/<app> rather than honoring XDG_CONFIG_HOME

@@ -73,14 +73,14 @@ describe("resolveStateDir", () => {
     ).toBe("C:\\Users\\u\\AppData\\Local\\claude-code-proxy")
   })
 
-  it("falls back to APPDATA on windows without LOCALAPPDATA", () => {
+  it("falls back to $HOME/AppData/Local on windows without LOCALAPPDATA", () => {
     expect(
       resolveStateDir({
         platform: "win32",
         env: { APPDATA: "C:\\Users\\u\\AppData\\Roaming" },
         home: "C:\\Users\\u",
       }),
-    ).toBe("C:\\Users\\u\\AppData\\Roaming\\claude-code-proxy")
+    ).toBe("C:\\Users\\u\\AppData\\Local\\claude-code-proxy")
   })
 })
 

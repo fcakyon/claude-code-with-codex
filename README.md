@@ -508,8 +508,8 @@ affecting other keys.
 - `proxy.log` — JSON-lines log, rotated at 20 MiB. It lives at
   `$XDG_STATE_HOME/claude-code-proxy/proxy.log` on macOS/Linux and at
   `%LOCALAPPDATA%\claude-code-proxy\proxy.log` on Windows (falling back to
-  `%APPDATA%`). Secrets (`authorization`, `access`, `refresh`, `id_token`,
-  `ChatGPT-Account-Id`, …) are redacted before write.
+  `%USERPROFILE%\AppData\Local`). Secrets (`authorization`, `access`,
+  `refresh`, `id_token`, `ChatGPT-Account-Id`, …) are redacted before write.
 - `config.json` — optional configuration file (see table above). It lives at
   `~/.config/claude-code-proxy/config.json` on macOS,
   `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` on Linux,
