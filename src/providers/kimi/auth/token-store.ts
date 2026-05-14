@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile, unlink, rename } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { keychainGet, keychainSet, keychainDelete } from "../../../keychain.ts"
-import { configDir, legacyConfigDir } from "../../../paths.ts"
+import { kimiAuthFile, legacyConfigDir } from "../../../paths.ts"
 
 export interface StoredAuth {
   access: string
@@ -12,7 +12,7 @@ export interface StoredAuth {
 }
 
 function file(): string {
-  return join(configDir(), "kimi", "auth.json")
+  return kimiAuthFile()
 }
 function legacyFile(): string {
   return join(legacyConfigDir(), "kimi", "auth.json")

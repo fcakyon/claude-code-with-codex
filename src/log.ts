@@ -1,7 +1,7 @@
-import { mkdir, appendFile, stat, rename } from "node:fs/promises"
+import { mkdir, stat, rename } from "node:fs/promises"
 import { createWriteStream, type WriteStream } from "node:fs"
-import { join } from "node:path"
-import { stateDir } from "./paths.ts"
+import { dirname } from "node:path"
+import { logFile } from "./paths.ts"
 import { logStderr, logVerbose } from "./config.ts"
 
 const MAX_LOG_BYTES = 20 * 1024 * 1024 // 20 MiB
@@ -18,8 +18,10 @@ export const REDACT_KEYS = new Set([
   "x-api-key",
 ])
 
+export { logFile }
+
 export function logDir(): string {
-  return stateDir()
+  return dirname(logFile())
 }
 
 let stream: WriteStream | undefined
@@ -27,9 +29,8 @@ let rotating: Promise<void> | undefined
 
 async function ensureStream(): Promise<WriteStream> {
   if (stream) return stream
-  const dir = stateDir()
-  await mkdir(dir, { recursive: true })
-  const file = join(dir, "proxy.log")
+  const file = logFile()
+  await mkdir(dirname(file), { recursive: true })
   stream = createWriteStream(file, { flags: "a", mode: 0o600 })
   return stream
 }
@@ -38,11 +39,10 @@ async function maybeRotate(): Promise<void> {
   if (rotating) return rotating
   rotating = (async () => {
     try {
-      const dir = stateDir()
-      const file = join(dir, "proxy.log")
+      const file = logFile()
       const s = await stat(file).catch(() => undefined)
       if (!s || s.size < MAX_LOG_BYTES) return
-      const rotated = join(dir, `proxy.log.${Date.now()}`)
+      const rotated = `${file}.${Date.now()}`
       await rename(file, rotated)
       if (stream) {
         stream.end()

@@ -1,9 +1,9 @@
 import { mkdir, readFile, writeFile, chmod } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { configDir, legacyConfigDir } from "../../../paths.ts"
+import { kimiDeviceIdFile, legacyConfigDir } from "../../../paths.ts"
 
 function path(): string {
-  return join(configDir(), "kimi", "device_id")
+  return kimiDeviceIdFile()
 }
 function legacyPath(): string {
   return join(legacyConfigDir(), "kimi", "device_id")

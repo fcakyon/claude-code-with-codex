@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { startServer } from "./server.ts"
-import { createLogger, logDir } from "./log.ts"
+import { createLogger, logFile } from "./log.ts"
 import { port as configPort, getConfig, aliasProvider as configAliasProvider } from "./config.ts"
 import { configDir } from "./paths.ts"
 import { existsSync } from "node:fs"
@@ -31,7 +31,7 @@ async function main() {
     const port = configPort()
     startServer({ port })
     console.log(`Proxy listening on http://localhost:${port}`)
-    console.log(`Logs: ${logDir()}/proxy.log`)
+    console.log(`Logs: ${logFile()}`)
     printConfigSummary()
     console.log()
     console.log("Providers are selected per-request by ANTHROPIC_MODEL:")

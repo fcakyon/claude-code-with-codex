@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile, unlink, rename } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { keychainGet, keychainSet, keychainDelete } from "../../../keychain.ts"
-import { configDir, legacyConfigDir } from "../../../paths.ts"
+import { codexAuthFile, legacyConfigDir } from "../../../paths.ts"
 
 export interface StoredAuth {
   access: string
@@ -11,7 +11,7 @@ export interface StoredAuth {
 }
 
 function file(): string {
-  return join(configDir(), "codex", "auth.json")
+  return codexAuthFile()
 }
 function legacyFile(): string {
   return join(legacyConfigDir(), "codex", "auth.json")

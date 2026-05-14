@@ -38,7 +38,10 @@ curl -fsSL https://raw.githubusercontent.com/raine/claude-code-proxy/main/script
 ```
 
 **Manual:** download a prebuilt binary for your platform from the
-[releases page](https://github.com/raine/claude-code-proxy/releases).
+[releases page](https://github.com/raine/claude-code-proxy/releases). Windows
+artifacts are published as `claude-code-proxy-windows-amd64.tar.gz` and
+`claude-code-proxy-windows-arm64.tar.gz`; extract the `.exe` somewhere on your
+`PATH`.
 
 ### 2. Pick a provider and authenticate
 
@@ -64,8 +67,10 @@ claude-code-proxy kimi auth login      # device-code flow (prints URL + code)
 Sign in with your **kimi.com account**. The verification URL is displayed; open
 it in any browser, confirm the code, and the CLI polls until done.
 
-On macOS credentials go to Keychain; on other platforms they are written to
-`~/.config/claude-code-proxy/<provider>/auth.json` (mode 0600).
+On macOS credentials go to Keychain. On Windows they are written under
+`%APPDATA%\claude-code-proxy\<provider>\auth.json`; on Linux they are written
+under `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/<provider>/auth.json`
+(mode 0600 where supported).
 
 Verify:
 
@@ -308,9 +313,9 @@ sequenceDiagram
 
 ### `serve`
 
-Starts the HTTP proxy and blocks. Binds to `127.0.0.1` only. Logs to
-`$XDG_STATE_HOME/claude-code-proxy/proxy.log` (rotated at 20 MiB). Set
-`CCP_LOG_STDERR=1` to mirror log lines to stderr while running.
+Starts the HTTP proxy and blocks. Binds to `127.0.0.1` only. Logs to the
+platform state directory (rotated at 20 MiB). Set `CCP_LOG_STDERR=1` to mirror
+log lines to stderr while running.
 
 ```sh
 claude-code-proxy serve
@@ -406,9 +411,9 @@ Sign in with your **kimi.com account**. The access token has a ~15 minute
 lifetime; the proxy refreshes it 5 minutes before expiry with a single-flight
 guard and persists the rotated refresh token.
 
-A persistent device ID is generated on first login at
-`~/.config/claude-code-proxy/kimi/device_id` and reused forever — it's bound
-into the issued JWT, so rotating it would invalidate your token.
+A persistent device ID is generated on first login next to the Kimi auth file
+and reused forever — it's bound into the issued JWT, so rotating it would
+invalidate your token.
 
 #### `kimi auth status`
 
@@ -446,9 +451,10 @@ Settings can come from either environment variables or a `config.json` file.
 Precedence per setting: **env var > config file > built-in default**. The
 config file is optional — env-var-only setups continue to work unchanged.
 
-The file lives at `~/.config/claude-code-proxy/config.json` on macOS (the same
-directory the auth tokens use, deliberately not `~/Library`) and at
-`${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` elsewhere.
+The file lives at `~/.config/claude-code-proxy/config.json` on macOS
+(deliberately not `~/Library`), at `%APPDATA%\claude-code-proxy\config.json` on
+Windows, and at
+`${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` on Linux.
 
 ```json
 {
@@ -477,7 +483,7 @@ directory the auth tokens use, deliberately not `~/Library`) and at
 | Variable                 | Config key          | Default                                           | Purpose                                                                                                          |
 | ------------------------ | ------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `PORT`                   | `port`              | `18765`                                           | Proxy listen port                                                                                                |
-| `XDG_STATE_HOME`         | —                   | `~/.local/state`                                  | Base dir for `proxy.log`                                                                                         |
+| `XDG_STATE_HOME`         | —                   | `~/.local/state`                                  | Linux/macOS base dir for `proxy.log`                                                                             |
 | `CCP_LOG_STDERR`         | `log.stderr`        | unset                                             | Also mirror log lines to stderr                                                                                  |
 | `CCP_LOG_VERBOSE`        | `log.verbose`       | unset                                             | Log full request/response bodies + every SSE event                                                               |
 | `CCP_ALIAS_PROVIDER`     | `aliasProvider`     | `codex`                                           | Route Anthropic-style aliases (`haiku`, `sonnet`, `opus`, `claude-*`) through `codex` or `kimi`                  |
@@ -499,23 +505,28 @@ affecting other keys.
 
 ### Files
 
-- `$XDG_STATE_HOME/claude-code-proxy/proxy.log` — JSON-lines log, rotated at 20
-  MiB. Secrets (`authorization`, `access`, `refresh`, `id_token`,
+- `proxy.log` — JSON-lines log, rotated at 20 MiB. It lives at
+  `%LOCALAPPDATA%\claude-code-proxy\proxy.log` on Windows (falling back to
+  `%APPDATA%`), and at `$XDG_STATE_HOME/claude-code-proxy/proxy.log` on
+  macOS/Linux. Secrets (`authorization`, `access`, `refresh`, `id_token`,
   `ChatGPT-Account-Id`, …) are redacted before write.
-- `~/.config/claude-code-proxy/config.json` (macOS) or
-  `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` — optional
-  configuration file (see table above).
-- `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/codex/auth.json` — codex
-  tokens (non-macOS; macOS uses Keychain under service
-  `claude-code-proxy.codex`). Pre-existing files at the legacy path
-  `~/.config/claude-code-proxy/codex/auth.json` are read as a fallback so
-  existing logins survive setting `XDG_CONFIG_HOME`.
-- `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/kimi/auth.json` — kimi
-  tokens (non-macOS; macOS uses Keychain under service
-  `claude-code-proxy.kimi`). Same legacy-path fallback as above.
-- `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/kimi/device_id` —
-  persistent UUID bound into the Kimi JWT at login. Reused for the lifetime
-  of the install.
+- `config.json` — optional configuration file (see table above). It lives at
+  `%APPDATA%\claude-code-proxy\config.json` on Windows,
+  `~/.config/claude-code-proxy/config.json` on macOS, and
+  `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` on Linux.
+- Codex tokens — macOS uses Keychain under service `claude-code-proxy.codex`.
+  Windows uses `%APPDATA%\claude-code-proxy\codex\auth.json`; Linux uses
+  `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/codex/auth.json`.
+  Pre-existing files at the legacy path
+  `~/.config/claude-code-proxy/codex/auth.json` are read as a fallback.
+- Kimi tokens — macOS uses Keychain under service `claude-code-proxy.kimi`.
+  Windows uses `%APPDATA%\claude-code-proxy\kimi\auth.json`; Linux uses
+  `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/kimi/auth.json`. Same
+  legacy-path fallback as above.
+- Kimi device ID — persistent UUID bound into the Kimi JWT at login. Windows
+  uses `%APPDATA%\claude-code-proxy\kimi\device_id`; Linux uses
+  `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/kimi/device_id`. Reused
+  for the lifetime of the install.
 
 ## Limitations
 
