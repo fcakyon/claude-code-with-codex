@@ -28,6 +28,7 @@ export type ReducerEvent =
   | { kind: "text-stop"; index: number }
   | { kind: "tool-start"; index: number; id: string; name: string }
   | { kind: "tool-delta"; index: number; partialJson: string }
+  | { kind: "tool-progress"; index: number }
   | { kind: "tool-stop"; index: number }
   | { kind: "finish"; stopReason: StopReason; usage: CodexUsage | undefined };
 
@@ -189,6 +190,8 @@ export async function* reduceUpstream(
       if (!state.bufferUntilDone) {
         state.emittedArgs = true;
         yield { kind: "tool-delta", index: state.index, partialJson: delta };
+      } else {
+        yield { kind: "tool-progress", index: state.index };
       }
       continue;
     }

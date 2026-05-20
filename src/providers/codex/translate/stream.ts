@@ -18,6 +18,8 @@ import {
  * upstream event is consumed, so rate-limit and upstream-failed cases
  * surface as SSE error events rather than non-200 statuses.
  */
+const KEEPALIVE_INTERVAL_MS = 15_000;
+
 export function translateStream(
   upstream: ReadableStream<Uint8Array>,
   opts: {
@@ -36,12 +38,38 @@ export function translateStream(
   const encoder = new TextEncoder();
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      const emit = (event: string, data: unknown) => {
-        controller.enqueue(encoder.encode(encodeSseEvent(event, data)));
-      };
       const activeTools = new Map<number, { id: string; name: string }>();
       const diagnostics = createUpstreamStreamDiagnostics();
+      let closed = false;
       let messageStarted = false;
+      let lastEmitAt = 0;
+      const safeClose = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // The stream can be closed by cancellation before the producer observes it.
+        }
+      };
+      const emit = (event: string, data: unknown) => {
+        if (closed || opts.signal?.aborted || controller.desiredSize === null) return false;
+        try {
+          controller.enqueue(encoder.encode(encodeSseEvent(event, data)));
+          lastEmitAt = Date.now();
+          return true;
+        } catch (err) {
+          if (opts.signal?.aborted || isClosedControllerError(err)) {
+            closed = true;
+            return false;
+          }
+          throw err;
+        }
+      };
+      const emitPingIfStale = () => {
+        if (!messageStarted || Date.now() - lastEmitAt < KEEPALIVE_INTERVAL_MS) return;
+        emit("ping", { type: "ping" });
+      };
       const ensureMessageStart = () => {
         if (messageStarted) return;
         messageStarted = true;
@@ -108,6 +136,9 @@ export function translateStream(
                 delta: { type: "input_json_delta", partial_json: e.partialJson },
               });
               break;
+            case "tool-progress":
+              emitPingIfStale();
+              break;
             case "tool-stop":
               activeTools.delete(e.index);
               emit("content_block_stop", { type: "content_block_stop", index: e.index });
@@ -127,6 +158,15 @@ export function translateStream(
       } catch (err) {
         const activeToolNames = Array.from(activeTools.values(), (tool) => tool.name);
         const activeToolCalls = Array.from(activeTools.values());
+        if (opts.signal?.aborted) {
+          opts.log.info("stream cancelled", {
+            err: describeError(err),
+            activeToolNames,
+            activeToolCalls,
+            diagnostics: describeDiagnostics(diagnostics),
+          });
+          return;
+        }
         if (err instanceof UpstreamStreamError) {
           const detail = {
             kind: err.kind,
@@ -165,10 +205,14 @@ export function translateStream(
           });
         }
       } finally {
-        controller.close();
+        safeClose();
       }
     },
   });
+}
+
+function isClosedControllerError(err: unknown): boolean {
+  return err instanceof TypeError && err.message.includes("Controller is already closed");
 }
 
 function describeDiagnostics(diagnostics: ReturnType<typeof createUpstreamStreamDiagnostics>) {
