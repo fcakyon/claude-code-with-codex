@@ -109,8 +109,8 @@ would 400 because no provider claims it, so set
 # Codex
 ANTHROPIC_BASE_URL=http://localhost:18765 \
 ANTHROPIC_AUTH_TOKEN=unused \
-ANTHROPIC_MODEL=gpt-5.4[1m] \
-ANTHROPIC_SMALL_FAST_MODEL=gpt-5.4-mini[1m] \
+ANTHROPIC_MODEL=gpt-5.5 \
+ANTHROPIC_SMALL_FAST_MODEL=gpt-5.4-mini \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
   claude
@@ -138,8 +138,8 @@ Or set it persistently in `~/.claude/settings.json`:
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:18765",
     "ANTHROPIC_AUTH_TOKEN": "unused",
-    "ANTHROPIC_MODEL": "gpt-5.4[1m]",
-    "ANTHROPIC_SMALL_FAST_MODEL": "gpt-5.4-mini[1m]",
+    "ANTHROPIC_MODEL": "gpt-5.5",
+    "ANTHROPIC_SMALL_FAST_MODEL": "gpt-5.4-mini",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": 1
   }
@@ -149,13 +149,19 @@ Or set it persistently in `~/.claude/settings.json`:
 ### 5. Context window size
 
 Claude Code decides auto-compaction based on the model's context window. For
-unknown models (like the ones the proxy uses) it defaults to 200K tokens, which
-is smaller than what the upstream models actually support (GPT-5.4: 400K+,
-Kimi: 256K). This causes auto-compact to fire earlier than necessary.
+unknown models, Claude Code uses its own fallback context size. Do not append
+`[1m]` to Codex model names unless the upstream model really supports a 1M-token
+window. Current official Codex metadata reports `gpt-5.5` with a 272K-token
+window, so `gpt-5.5[1m]` makes Claude Code wait too long before compacting and
+can cause upstream context-window errors.
 
-The `[1m]` suffix on the model name (shown in the examples above) is a Claude
-Code convention that tells it to use a 1M-token context window instead. This
-raises the auto-compact threshold without disabling it entirely.
+Use the plain Codex model name for Codex models, such as `gpt-5.5` or
+`gpt-5.4-mini`. The proxy still strips a trailing `[1m]` for compatibility, but
+that suffix only affects Claude Code's local compaction threshold. It does not
+increase Codex's upstream context window.
+
+Kimi can still use `kimi-for-coding[1m]` if you want Claude Code to use a larger
+local compaction threshold for that provider.
 
 If you'd rather disable auto-compact completely, set
 `DISABLE_AUTO_COMPACT=1` in your env or `~/.claude/settings.json`. Manual
@@ -180,8 +186,8 @@ the default.
 if [ -f "$HOME/.claude/claude-code-proxy-enabled" ]; then
     export ANTHROPIC_BASE_URL="http://localhost:18765"
     export ANTHROPIC_AUTH_TOKEN="unused"
-    export ANTHROPIC_MODEL="gpt-5.4[1m]"
-    export ANTHROPIC_SMALL_FAST_MODEL="gpt-5.4-mini[1m]"
+    export ANTHROPIC_MODEL="gpt-5.5"
+    export ANTHROPIC_SMALL_FAST_MODEL="gpt-5.4-mini"
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
     export CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK="1"
 fi
@@ -223,8 +229,8 @@ Upstream: `https://chatgpt.com/backend-api/codex/responses` (Responses API).
 
 Set `ANTHROPIC_MODEL` to a model your ChatGPT subscription is allowed to use.
 Append `-fast` to a Codex model name to request Codex fast mode for that request
-without restarting the proxy. For example, `gpt-5.4-fast[1m]` is sent upstream as
-model `gpt-5.4` with `service_tier: "priority"`. An explicit
+without restarting the proxy. For example, `gpt-5.5-fast` is sent upstream as
+model `gpt-5.5` with `service_tier: "priority"`. An explicit
 `codex.serviceTier` / `CCP_CODEX_SERVICE_TIER` override still takes precedence.
 
 Reasoning effort: Claude Code's `output_config.effort` value (the one you see in

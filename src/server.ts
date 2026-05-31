@@ -191,11 +191,8 @@ function captureInboundTraffic(
   ctx.traffic.writeJson("010-anthropic-request", body);
 }
 
-// Claude Code uses a [1m] suffix convention (e.g. "gpt-5.4[1m]") to
-// signal that the model should be treated as having a 1M-token context
-// window. Claude Code normalizes this away before sending requests to
-// the API, but we strip it here too as defense-in-depth in case a
-// future version or a different client includes it.
+// Claude Code may append a [1m] suffix to model names as a local compaction
+// hint. The suffix is not part of the upstream model id.
 export function normalizeIncomingModel(model: string): string {
   return model.replace(/\[1m\]$/i, "");
 }

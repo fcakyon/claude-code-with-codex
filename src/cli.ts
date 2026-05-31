@@ -36,10 +36,10 @@ async function main() {
     console.log(`  export ANTHROPIC_BASE_URL="http://localhost:${port}"`);
     console.log(`  export ANTHROPIC_AUTH_TOKEN="anything"`);
     console.log(
-      `  export ANTHROPIC_MODEL="kimi-for-coding[1m]"              # or gpt-5.4[1m], etc.`,
+      `  export ANTHROPIC_MODEL="gpt-5.5"                         # or kimi-for-coding[1m]`,
     );
     console.log(
-      `  export ANTHROPIC_SMALL_FAST_MODEL="kimi-for-coding[1m]"   # background / title-gen`,
+      `  export ANTHROPIC_SMALL_FAST_MODEL="gpt-5.4-mini"          # background / title-gen`,
     );
     console.log(`  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"`);
     return;
