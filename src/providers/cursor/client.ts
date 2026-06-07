@@ -18,6 +18,7 @@ export interface CursorRunOptions {
   ctx: RequestContext;
   proto?: CursorProto;
   openRunStream?: CursorRunStreamFactory;
+  shellStreamHandler?: CursorShellStreamHandler;
 }
 
 export type CursorRunStreamFactory = (opts: {
@@ -32,6 +33,29 @@ export interface CursorRunStream {
   write(frame: Uint8Array): Promise<void>;
   close(): void;
 }
+
+export interface CursorShellStreamExec {
+  id?: number;
+  execId?: string;
+  message?: { case?: string; value?: unknown };
+}
+
+export interface CursorShellStreamResult {
+  stdout?: string;
+  stderr?: string;
+  exitCode: number;
+  cwd?: string;
+  aborted?: boolean;
+  abortReason?: string;
+  localExecutionTimeMs?: number;
+}
+
+export type CursorAppendMessage = (messageJson: unknown) => Promise<void>;
+
+export type CursorShellStreamHandler = (
+  exec: CursorShellStreamExec,
+  append: CursorAppendMessage,
+) => Promise<void>;
 
 export type CursorAgentMode = "AGENT_MODE_AGENT" | "AGENT_MODE_PLAN" | "AGENT_MODE_ASK";
 
@@ -150,7 +174,7 @@ export async function runCursorAgent(opts: CursorRunOptions): Promise<ReadableSt
       async transform(chunk, controller) {
         opts.ctx.traffic?.writeBytes("030-cursor-run-response-chunk", chunk);
         controller.enqueue(chunk);
-        await processServerControlFrames(chunk, proto, append, opts.ctx, (text) => {
+        await processServerControlFrames(chunk, proto, append, opts.ctx, opts.shellStreamHandler, (text) => {
           if (!text || controller.desiredSize === null) return;
           try {
             opts.ctx.traffic?.writeJsonEvent("038-cursor-tool-trace", { text });
@@ -329,6 +353,7 @@ async function processServerControlFrames(
   proto: CursorProto,
   append: (messageJson: unknown) => Promise<void>,
   ctx?: RequestContext,
+  shellStreamHandler?: CursorShellStreamHandler,
   emitTrace?: (text: string) => void,
 ): Promise<void> {
   const state = controlFrameState.get(append) ?? {
@@ -367,7 +392,11 @@ async function processServerControlFrames(
         await append({ execClientMessage: await buildGrepResult(oneof.value) });
         await append({ execClientControlMessage: { streamClose: { id: oneof.value.id } } });
       } else if (oneof.value?.message?.case === "shellStreamArgs") {
-        await runShellStream(oneof.value, append, emitTrace);
+        if (shellStreamHandler) {
+          await shellStreamHandler(oneof.value, append);
+        } else {
+          await runShellStream(oneof.value, append, emitTrace);
+        }
       }
     } else if (oneof?.case === "kvServerMessage") {
       const kv = oneof.value;
@@ -382,6 +411,20 @@ async function processServerControlFrames(
       }
     }
   }
+}
+
+export function cursorShellStreamArgs(exec: CursorShellStreamExec): {
+  command: string;
+  workingDirectory: string;
+  timeoutMs: number;
+} {
+  const args = asRecord(exec.message?.value);
+  const command = typeof args?.command === "string" ? args.command : "";
+  const workingDirectory = typeof args?.workingDirectory === "string" && args.workingDirectory
+    ? args.workingDirectory
+    : process.cwd();
+  const timeoutMs = typeof args?.timeout === "number" && args.timeout > 0 ? args.timeout : 30_000;
+  return { command, workingDirectory, timeoutMs };
 }
 
 async function buildReadResult(exec: {
@@ -427,12 +470,7 @@ async function runShellStream(
   append: (messageJson: unknown) => Promise<void>,
   emitTrace?: (text: string) => void,
 ): Promise<void> {
-  const args = asRecord(exec.message?.value);
-  const command = typeof args?.command === "string" ? args.command : "";
-  const workingDirectory = typeof args?.workingDirectory === "string" && args.workingDirectory
-    ? args.workingDirectory
-    : process.cwd();
-  const timeoutMs = typeof args?.timeout === "number" && args.timeout > 0 ? args.timeout : 30_000;
+  const { command, workingDirectory, timeoutMs } = cursorShellStreamArgs(exec);
   const started = Date.now();
   let outputStarted = false;
   const emitOutputTrace = (data: string) => {
@@ -497,6 +535,33 @@ async function runShellStream(
     clearTimeout(timeout);
     await append({ execClientControlMessage: { streamClose: { id: exec.id } } });
   }
+}
+
+export async function appendCursorShellStreamResult(
+  exec: CursorShellStreamExec,
+  result: CursorShellStreamResult,
+  append: CursorAppendMessage,
+): Promise<void> {
+  const cwd = result.cwd || cursorShellStreamArgs(exec).workingDirectory;
+  await append({ execClientMessage: buildShellStream(exec, { start: {} }) });
+  if (result.stdout) {
+    await append({ execClientMessage: buildShellStream(exec, { stdout: { data: result.stdout } }) });
+  }
+  if (result.stderr) {
+    await append({ execClientMessage: buildShellStream(exec, { stderr: { data: result.stderr } }) });
+  }
+  await append({
+    execClientMessage: buildShellStream(exec, {
+      exit: {
+        code: result.exitCode,
+        cwd,
+        aborted: Boolean(result.aborted),
+        ...(result.abortReason ? { abortReason: result.abortReason } : {}),
+        localExecutionTimeMs: result.localExecutionTimeMs ?? 0,
+      },
+    }),
+  });
+  await append({ execClientControlMessage: { streamClose: { id: exec.id } } });
 }
 
 async function appendShellOutput(

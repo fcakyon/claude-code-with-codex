@@ -27,6 +27,11 @@ import {
   cursorConversationForRequest,
   recordCursorConversation,
 } from "./session.ts";
+import {
+  canBridgeCursorShellTools,
+  createCursorShellToolBridge,
+  resumeCursorShellToolBridge,
+} from "./tool-bridge.ts";
 import type { CursorAuth } from "./auth/token-store.ts";
 import type { CursorProto } from "./proto-loader.ts";
 
@@ -56,6 +61,9 @@ async function handleMessages(
 ): Promise<Response> {
   const log = ctx.childLogger("provider.cursor");
   const messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
+  const resumed = resumeCursorShellToolBridge(body, ctx, messageId);
+  if (resumed) return resumed;
+
   const selection = resolveCursorModel(body);
   const prompt = renderCursorPrompt(body);
   const wantStream = wantsDownstreamStream(body);
@@ -78,6 +86,22 @@ async function handleMessages(
     return jsonError(401, "authentication_error", expiredAuthMessage(auth));
   }
 
+  const onSession = (cursorSessionId: string) => {
+    recordCursorConversation(ctx.sessionId, cursorSessionId);
+    log.debug("cursor session observed", { cursorSessionId });
+  };
+  const shellBridge = wantStream && ctx.sessionId && canBridgeCursorShellTools(body, ctx)
+    ? createCursorShellToolBridge({
+      sessionId: ctx.sessionId,
+      messageId,
+      model: body.model,
+      log: ctx.childLogger("cursor.bridge"),
+      traffic: ctx.traffic,
+      proto: deps.proto,
+      onSession,
+    })
+    : undefined;
+
   let upstream: ReadableStream<Uint8Array>;
   try {
     upstream = await deps.runAgent({
@@ -87,6 +111,7 @@ async function handleMessages(
       model: selection.requestedModel,
       auth,
       ctx,
+      shellStreamHandler: shellBridge?.shellStreamHandler,
     });
   } catch (err) {
     if (err instanceof CursorError) {
@@ -101,13 +126,8 @@ async function handleMessages(
     throw err;
   }
 
-  const onSession = (cursorSessionId: string) => {
-    recordCursorConversation(ctx.sessionId, cursorSessionId);
-    log.debug("cursor session observed", { cursorSessionId });
-  };
-
   if (wantStream) {
-    const stream = translateCursorStream(upstream, {
+    const stream = shellBridge?.stream(upstream, ctx.signal) ?? translateCursorStream(upstream, {
       messageId,
       model: body.model,
       log: ctx.childLogger("cursor.stream"),
