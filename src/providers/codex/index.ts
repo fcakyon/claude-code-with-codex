@@ -2,6 +2,12 @@ import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import { wantsDownstreamStream } from "../../anthropic/stream.ts";
 import type { Provider, RequestContext, CliHandlers } from "../types.ts";
 import {
+  anthropicErrorBody,
+  jsonError,
+  jsonResponse,
+  sseResponse,
+} from "../../anthropic/response.ts";
+import {
   ALLOWED_MODELS,
   assertAllowedModel,
   FAST_MODEL_ALIASES,
@@ -127,13 +133,6 @@ function warnForHeavyImages(
   });
 }
 
-function jsonError(status: number, type: string, message: string): Response {
-  return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
 function invalidServiceTierResponse(err: InvalidServiceTierError): Response {
   return jsonError(400, "invalid_request_error", err.message);
 }
@@ -190,9 +189,7 @@ async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): P
       previousMessageTranslatedInputTokens: state?.lastMessage?.translatedInputTokens,
     });
   }
-  return new Response(JSON.stringify({ input_tokens: tokens }), {
-    headers: { "content-type": "application/json" },
-  });
+  return jsonResponse({ input_tokens: tokens });
 }
 
 async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
@@ -305,14 +302,14 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
     if (err instanceof CodexError) {
       log.warn("codex error", { status: err.status, detail: err.detail });
       if (err.status === 429) {
-        const headers: Record<string, string> = { "content-type": "application/json" };
+        const headers: Record<string, string> = {};
         if (err.meta?.retryAfter) headers["retry-after"] = err.meta.retryAfter;
-        return new Response(
-          JSON.stringify({
-            type: "error",
-            error: { type: "rate_limit_error", message: err.detail || err.message },
-          }),
-          { status: 429, headers },
+        return jsonResponse(
+          anthropicErrorBody("rate_limit_error", err.detail || err.message),
+          {
+            status: 429,
+            headers,
+          },
         );
       }
       const type = err.status === 401 || err.status === 403 ? "authentication_error" : "api_error";
@@ -368,14 +365,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       },
       onInvalidateContinuation: () => clearContinuation(ctx.sessionId),
     });
-    return new Response(stream, {
-      status: 200,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      },
-    });
+    return sseResponse(stream);
   }
 
   try {
@@ -417,9 +407,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
         stopReason: result.response.stop_reason,
       });
     }
-    return new Response(JSON.stringify(result.response), {
-      headers: { "content-type": "application/json" },
-    });
+    return jsonResponse(result.response);
   } catch (err) {
     clearContinuation(ctx.sessionId);
     if (err instanceof UpstreamStreamError) {
@@ -428,13 +416,10 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
         message: err.message,
       });
       if (err.kind === "rate_limit") {
-        const headers: Record<string, string> = { "content-type": "application/json" };
+        const headers: Record<string, string> = {};
         if (err.retryAfterSeconds) headers["retry-after"] = String(err.retryAfterSeconds);
-        return new Response(
-          JSON.stringify({
-            type: "error",
-            error: { type: "rate_limit_error", message: err.message },
-          }),
+        return jsonResponse(
+          anthropicErrorBody("rate_limit_error", err.message),
           { status: 429, headers },
         );
       }

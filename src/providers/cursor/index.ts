@@ -1,5 +1,6 @@
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import { wantsDownstreamStream } from "../../anthropic/stream.ts";
+import { jsonError, jsonResponse, sseResponse } from "../../anthropic/response.ts";
 import { logVerbose } from "../../config.ts";
 import type { CliHandlers, Provider, RequestContext } from "../types.ts";
 import {
@@ -42,19 +43,10 @@ const defaultDeps: CursorProviderDeps = {
   runAgent: runCursorAgent,
 };
 
-function jsonError(status: number, type: string, message: string): Response {
-  return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
 async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
   const tokens = countCursorTokens(body);
   ctx.childLogger("provider.cursor").debug("count_tokens", { tokens });
-  return new Response(JSON.stringify({ input_tokens: tokens }), {
-    headers: { "content-type": "application/json" },
-  });
+  return jsonResponse({ input_tokens: tokens });
 }
 
 async function handleMessages(
@@ -124,14 +116,7 @@ async function handleMessages(
       proto: deps.proto,
       onSession,
     });
-    return new Response(stream, {
-      status: 200,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      },
-    });
+    return sseResponse(stream);
   }
 
   try {
@@ -143,9 +128,7 @@ async function handleMessages(
       proto: deps.proto,
       onSession,
     });
-    return new Response(JSON.stringify(result.response), {
-      headers: { "content-type": "application/json" },
-    });
+    return jsonResponse(result.response);
   } catch (err) {
     log.warn("cursor accumulate error", { err: String(err) });
     if (err instanceof CursorError) {

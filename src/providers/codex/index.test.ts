@@ -31,6 +31,7 @@ describe("codexProvider", () => {
     );
 
     expect(resp.status).toBe(400);
+    expect(resp.headers.get("content-type")).toBe("application/json");
     expect(await resp.json()).toEqual({
       type: "error",
       error: {
@@ -49,6 +50,7 @@ describe("codexProvider", () => {
     );
 
     expect(resp.status).toBe(400);
+    expect(resp.headers.get("content-type")).toBe("application/json");
     expect(await resp.json()).toEqual({
       type: "error",
       error: {

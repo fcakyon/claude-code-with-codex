@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { loadConfig } from "./config.ts";
-import { startServer, normalizeIncomingModel } from "./server.ts";
+import type { createLogger } from "./log.ts";
+import { startServer, normalizeIncomingModel, wrapStreamResponse } from "./server.ts";
 import { startTestServer } from "./test/server.ts";
 
 const servers: Array<{ stop: () => void }> = [];
@@ -26,6 +27,87 @@ describe("normalizeIncomingModel", () => {
     expect(normalizeIncomingModel("gpt-5.5[1m]")).toBe("gpt-5.5");
     expect(normalizeIncomingModel("gpt-5.4-fast[1m]")).toBe("gpt-5.4-fast");
     expect(normalizeIncomingModel("kimi-for-coding")).toBe("kimi-for-coding");
+  });
+});
+
+describe("server error responses", () => {
+  it("returns JSON for health checks", async () => {
+    const server = startTestServer(startServer);
+    servers.push(server);
+
+    const resp = await fetch(`http://127.0.0.1:${server.port}/healthz`);
+    const body = (await resp.json()) as { ok: boolean };
+
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("content-type")).toBe("application/json");
+    expect(body).toEqual({ ok: true });
+  });
+
+  it("returns JSON for unknown routes", async () => {
+    const server = startTestServer(startServer);
+    servers.push(server);
+
+    const resp = await fetch(`http://127.0.0.1:${server.port}/not-a-route`);
+    const body = (await resp.json()) as { type: string; error: { type: string; message: string } };
+
+    expect(resp.status).toBe(404);
+    expect(resp.headers.get("content-type")).toBe("application/json");
+    expect(body).toEqual({
+      type: "error",
+      error: {
+        type: "not_found",
+        message: "No route for GET /not-a-route",
+      },
+    });
+  });
+
+  it("keeps invalid JSON request parsing failures as JSON", async () => {
+    const server = startTestServer(startServer);
+    servers.push(server);
+
+    const resp = await fetch(`http://127.0.0.1:${server.port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    });
+    const body = (await resp.json()) as { error: { type: string; message: string } };
+
+    expect(resp.status).toBe(400);
+    expect(resp.headers.get("content-type")).toBe("application/json");
+    expect(body.error.type).toBe("invalid_request_error");
+  });
+});
+
+describe("stream wrapper", () => {
+  it("strips hop-by-hop headers when wrapping upstream streams", async () => {
+    const upstream = new Response("hello", {
+      status: 207,
+      statusText: "Multi-Status",
+      headers: {
+        "content-encoding": "gzip",
+        "content-length": "5",
+        "transfer-encoding": "chunked",
+        "x-upstream": "ok",
+      },
+    });
+
+    const wrapped = wrapStreamResponse(upstream, "test", 0, {
+      info() {},
+      error() {},
+      warn() {},
+      debug() {},
+      child() {
+        return this;
+      },
+    } as ReturnType<typeof createLogger>);
+
+    expect(wrapped.status).toBe(207);
+    expect(wrapped.statusText).toBe("Multi-Status");
+    expect(wrapped.headers.get("content-encoding")).toBeNull();
+    expect(wrapped.headers.get("content-length")).toBeNull();
+    expect(wrapped.headers.get("transfer-encoding")).toBeNull();
+    expect(wrapped.headers.get("x-upstream")).toBe("ok");
+    expect(await wrapped.text()).toBe("hello");
   });
 });
 

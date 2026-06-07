@@ -2,6 +2,12 @@ import type { Provider, CliHandlers, RequestContext } from "../types.ts";
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import { wantsDownstreamStream } from "../../anthropic/stream.ts";
 import {
+  anthropicErrorBody,
+  jsonError,
+  jsonResponse,
+  sseResponse,
+} from "../../anthropic/response.ts";
+import {
   assertAllowedModel,
   ModelNotAllowedError,
   resolveModel,
@@ -17,22 +23,13 @@ import { persistInitialTokens } from "./auth/manager.ts";
 import { loadAuth, clearAuth, authPath } from "./auth/token-store.ts";
 import { logVerbose } from "../../config.ts";
 
-function jsonError(status: number, type: string, message: string): Response {
-  return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
 async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
   const log = ctx.childLogger("provider.kimi");
   const resolvedModel = resolveModel(body.model);
   const translated = translateRequest({ ...body, model: resolvedModel });
   const tokens = countTranslatedTokens(translated);
   log.debug("count_tokens", { tokens });
-  return new Response(JSON.stringify({ input_tokens: tokens }), {
-    headers: { "content-type": "application/json" },
-  });
+  return jsonResponse({ input_tokens: tokens });
 }
 
 async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
@@ -92,14 +89,14 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
     if (err instanceof KimiError) {
       log.warn("kimi error", { status: err.status, detail: err.detail });
       if (err.status === 429) {
-        const headers: Record<string, string> = { "content-type": "application/json" };
+        const headers: Record<string, string> = {};
         if (err.meta?.retryAfter) headers["retry-after"] = err.meta.retryAfter;
-        return new Response(
-          JSON.stringify({
-            type: "error",
-            error: { type: "rate_limit_error", message: err.detail || err.message },
-          }),
-          { status: 429, headers },
+        return jsonResponse(
+          anthropicErrorBody("rate_limit_error", err.detail || err.message),
+          {
+            status: 429,
+            headers,
+          },
         );
       }
       const type = err.status === 401 || err.status === 403 ? "authentication_error" : "api_error";
@@ -130,14 +127,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
         });
       },
     });
-    return new Response(stream, {
-      status: 200,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      },
-    });
+    return sseResponse(stream);
   }
 
   try {
@@ -147,9 +137,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       log: ctx.childLogger("kimi.accumulate"),
       traffic: ctx.traffic,
     });
-    return new Response(JSON.stringify(result.response), {
-      headers: { "content-type": "application/json" },
-    });
+    return jsonResponse(result.response);
   } catch (err) {
     if (err instanceof UpstreamStreamError) {
       log.warn("upstream stream error (non-streaming)", {
@@ -157,13 +145,10 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
         message: err.message,
       });
       if (err.kind === "rate_limit") {
-        const headers: Record<string, string> = { "content-type": "application/json" };
+        const headers: Record<string, string> = {};
         if (err.retryAfterSeconds) headers["retry-after"] = String(err.retryAfterSeconds);
-        return new Response(
-          JSON.stringify({
-            type: "error",
-            error: { type: "rate_limit_error", message: err.message },
-          }),
+        return jsonResponse(
+          anthropicErrorBody("rate_limit_error", err.message),
           { status: 429, headers },
         );
       }

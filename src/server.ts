@@ -1,5 +1,6 @@
 import { createLogger, logDir, REDACT_KEYS } from "./log.ts";
 import { createTrafficCapture, headersToRecord } from "./traffic.ts";
+import { jsonError, jsonResponse, streamResponse } from "./anthropic/response.ts";
 
 import type { AnthropicRequest } from "./anthropic/schema.ts";
 import type { AliasProvider } from "./config.ts";
@@ -111,9 +112,7 @@ export function startServer(opts: ServeOptions): { stop: () => void; port: numbe
 
 async function route(req: Request, url: URL, reqId: string): Promise<Response> {
   if (url.pathname === "/healthz") {
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: { "content-type": "application/json" },
-    });
+    return jsonResponse({ ok: true });
   }
 
   if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
@@ -252,7 +251,7 @@ function isClosedControllerError(err: unknown): boolean {
   return err instanceof TypeError && err.message.includes("Controller is already closed");
 }
 
-function wrapStreamResponse(
+export function wrapStreamResponse(
   resp: Response,
   reqId: string,
   start: number,
@@ -311,15 +310,7 @@ function wrapStreamResponse(
       reader.cancel().catch(() => {});
     },
   });
-  const headers = new Headers(resp.headers);
-  headers.delete("content-encoding");
-  headers.delete("content-length");
-  headers.delete("transfer-encoding");
-  return new Response(stream, {
-    status: resp.status,
-    statusText: resp.statusText,
-    headers,
-  });
+  return streamResponse(resp, stream);
 }
 
 function redactedQuery(url: URL): Record<string, string> {
@@ -328,11 +319,4 @@ function redactedQuery(url: URL): Record<string, string> {
     out[k] = REDACT_KEYS.has(k.toLowerCase()) ? `[redacted len=${v.length}]` : v;
   }
   return out;
-}
-
-function jsonError(status: number, type: string, message: string): Response {
-  return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
 }

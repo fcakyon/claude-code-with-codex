@@ -28,6 +28,7 @@ describe("Cursor provider auth errors", () => {
     };
 
     expect(response.status).toBe(401);
+    expect(response.headers.get("content-type")).toBe("application/json");
     expect(body.error.type).toBe("authentication_error");
     expect(body.error.message).toContain("expired or near expiry");
   });
@@ -56,6 +57,7 @@ describe("Cursor provider messages", () => {
     const body = (await response.json()) as { content: Array<{ type: string; text?: string }> };
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
     expect(body.content).toEqual([{ type: "text", text: "hello" }]);
   });
 
@@ -85,6 +87,8 @@ describe("Cursor provider messages", () => {
     }
 
     expect(response.headers.get("content-type")).toBe("text/event-stream");
+    expect(response.headers.get("cache-control")).toBe("no-cache");
+    expect(response.headers.get("connection")).toBe("keep-alive");
     expect(events.map((event) => event.event)).toContain("message_start");
     expect(events.find((event) => event.event === "content_block_delta")?.data.delta.text).toBe(
       "streamed",
