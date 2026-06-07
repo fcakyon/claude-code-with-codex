@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { encodeConnectFrame, runCursorAgent } from "./client.ts";
+import { decodeCursorStream, encodeConnectFrame, runCursorAgent } from "./client.ts";
 import type { CursorProto, ProtoClass, ProtoMessage } from "./proto-loader.ts";
 import type { RequestContext } from "../types.ts";
 
@@ -227,7 +227,10 @@ describe("Cursor protocol client", () => {
         close() {},
       }),
     });
-    await drain(upstream);
+    let trace = "";
+    for await (const event of decodeCursorStream(upstream, fakeProto)) {
+      if (event.type === "text_delta") trace += event.text;
+    }
 
     const clientMessages = sentFrames.map(decodeFrameJson) as Array<Record<string, any>>;
     expect(clientMessages[1]).toEqual({ execClientControlMessage: { heartbeat: {} } });
@@ -236,6 +239,9 @@ describe("Cursor protocol client", () => {
     expect(clientMessages.some((message) => message.execClientMessage?.shellStream?.stderr?.data === "stderr")).toBe(true);
     expect(clientMessages.some((message) => message.execClientMessage?.shellStream?.exit?.code === 0)).toBe(true);
     expect(clientMessages.at(-1)).toEqual({ execClientControlMessage: { streamClose: { id: 9 } } });
+    expect(trace).toContain("Bash(printf stdout; printf stderr >&2)");
+    expect(trace).toContain("stdout");
+    expect(trace).toContain("stderr");
   });
 
   it("closes the Cursor run stream when the downstream consumer cancels", async () => {

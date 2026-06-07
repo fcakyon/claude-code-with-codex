@@ -150,7 +150,18 @@ export async function runCursorAgent(opts: CursorRunOptions): Promise<ReadableSt
       async transform(chunk, controller) {
         opts.ctx.traffic?.writeBytes("030-cursor-run-response-chunk", chunk);
         controller.enqueue(chunk);
-        await processServerControlFrames(chunk, proto, append, opts.ctx);
+        await processServerControlFrames(chunk, proto, append, opts.ctx, (text) => {
+          if (!text || controller.desiredSize === null) return;
+          try {
+            opts.ctx.traffic?.writeJsonEvent("038-cursor-tool-trace", { text });
+            const messageBytes = proto.AgentServerMessage.fromJson({
+              interactionUpdate: { textDelta: { text } },
+            }).toBinary();
+            controller.enqueue(encodeConnectFrame(messageBytes));
+          } catch {
+            // Downstream cancellation can close the transformed stream while a Cursor exec is still finishing.
+          }
+        });
       },
       flush() {
         cleanup();
@@ -318,6 +329,7 @@ async function processServerControlFrames(
   proto: CursorProto,
   append: (messageJson: unknown) => Promise<void>,
   ctx?: RequestContext,
+  emitTrace?: (text: string) => void,
 ): Promise<void> {
   const state = controlFrameState.get(append) ?? {
     buffer: Buffer.alloc(0),
@@ -355,7 +367,7 @@ async function processServerControlFrames(
         await append({ execClientMessage: await buildGrepResult(oneof.value) });
         await append({ execClientControlMessage: { streamClose: { id: oneof.value.id } } });
       } else if (oneof.value?.message?.case === "shellStreamArgs") {
-        await runShellStream(oneof.value, append);
+        await runShellStream(oneof.value, append, emitTrace);
       }
     } else if (oneof?.case === "kvServerMessage") {
       const kv = oneof.value;
@@ -413,6 +425,7 @@ async function runShellStream(
     message?: { case?: string; value?: unknown };
   },
   append: (messageJson: unknown) => Promise<void>,
+  emitTrace?: (text: string) => void,
 ): Promise<void> {
   const args = asRecord(exec.message?.value);
   const command = typeof args?.command === "string" ? args.command : "";
@@ -421,6 +434,18 @@ async function runShellStream(
     : process.cwd();
   const timeoutMs = typeof args?.timeout === "number" && args.timeout > 0 ? args.timeout : 30_000;
   const started = Date.now();
+  let outputStarted = false;
+  const emitOutputTrace = (data: string) => {
+    if (!emitTrace || !data) return;
+    if (!outputStarted) {
+      outputStarted = true;
+      emitTrace("\n  \u23bf  ");
+    }
+    emitTrace(data);
+  };
+  if (emitTrace && command) {
+    emitTrace(`\n\n\u23fa Bash(${command})\n`);
+  }
   await append({ execClientMessage: buildShellStream(exec, { start: {} }) });
 
   let timedOut = false;
@@ -436,8 +461,8 @@ async function runShellStream(
   try {
     const [exitCode] = await Promise.all([
       proc.exited,
-      appendShellOutput(exec, proc.stdout, "stdout", append),
-      appendShellOutput(exec, proc.stderr, "stderr", append),
+      appendShellOutput(exec, proc.stdout, "stdout", append, emitOutputTrace),
+      appendShellOutput(exec, proc.stderr, "stderr", append, emitOutputTrace),
     ]);
     await append({
       execClientMessage: buildShellStream(exec, {
@@ -458,6 +483,7 @@ async function runShellStream(
         },
       }),
     });
+    emitOutputTrace(`Shell execution failed: ${err instanceof Error ? err.message : String(err)}`);
     await append({
       execClientMessage: buildShellStream(exec, {
         exit: {
@@ -478,6 +504,7 @@ async function appendShellOutput(
   stream: ReadableStream<Uint8Array> | null,
   streamName: "stdout" | "stderr",
   append: (messageJson: unknown) => Promise<void>,
+  emitTrace?: (data: string) => void,
 ): Promise<void> {
   if (!stream) return;
   const reader = stream.getReader();
@@ -488,9 +515,11 @@ async function appendShellOutput(
       if (done) break;
       if (!value?.byteLength) continue;
       const data = decoder.decode(value, { stream: true });
+      emitTrace?.(data);
       if (data) await append({ execClientMessage: buildShellStream(exec, { [streamName]: { data } }) });
     }
     const rest = decoder.decode();
+    emitTrace?.(rest);
     if (rest) await append({ execClientMessage: buildShellStream(exec, { [streamName]: { data: rest } }) });
   } finally {
     reader.releaseLock();
