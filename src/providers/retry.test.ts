@@ -89,6 +89,19 @@ describe("retryOn429", () => {
     }
   }
 
+  const retryWithFakeRateLimit = (retryAfter: string, onAttempt: () => void) =>
+    retryOn429(
+      async () => {
+        onAttempt();
+        throw new FakeRateLimit(retryAfter);
+      },
+      {
+        log: silentLog,
+        classify: (err) =>
+          err instanceof FakeRateLimit ? { retryAfter: err.retryAfter } : undefined,
+      },
+    );
+
   it("returns successful result without retry", async () => {
     let calls = 0;
     const result = await retryOn429(
@@ -105,45 +118,41 @@ describe("retryOn429", () => {
     expect(calls).toBe(1);
   });
 
-  it("retries up to MAX_RATE_LIMIT_RETRIES then throws", async () => {
-    let calls = 0;
-    const start = Date.now();
-    await expectRejects(
-      retryOn429(
-        async () => {
-          calls++;
-          throw new FakeRateLimit("0");
-        },
-        {
-          log: silentLog,
-          classify: (err) =>
-            err instanceof FakeRateLimit ? { retryAfter: err.retryAfter } : undefined,
-        },
-      ),
-      (err) => expect(err).toBeInstanceOf(FakeRateLimit),
-    );
-    expect(calls).toBe(MAX_RATE_LIMIT_RETRIES + 1);
-    expect(Date.now() - start).toBeLessThan(2000);
-  });
+  const retryLimitCases: Array<{
+    name: string;
+    retryAfter: string;
+    expectedCalls: number;
+    maxDurationMs?: number;
+  }> = [
+    {
+      name: "retries up to MAX_RATE_LIMIT_RETRIES then throws",
+      retryAfter: "0",
+      expectedCalls: MAX_RATE_LIMIT_RETRIES + 1,
+      maxDurationMs: 2000,
+    },
+    {
+      name: "gives up immediately when retry-after exceeds budget",
+      retryAfter: "120",
+      expectedCalls: 1,
+    },
+  ] as const;
 
-  it("gives up immediately when retry-after exceeds budget", async () => {
-    let calls = 0;
-    await expectRejects(
-      retryOn429(
-        async () => {
+  for (const tc of retryLimitCases) {
+    it(tc.name, async () => {
+      let calls = 0;
+      const start = Date.now();
+      await expectRejects(
+        retryWithFakeRateLimit(tc.retryAfter, () => {
           calls++;
-          throw new FakeRateLimit("120");
-        },
-        {
-          log: silentLog,
-          classify: (err) =>
-            err instanceof FakeRateLimit ? { retryAfter: err.retryAfter } : undefined,
-        },
-      ),
-      (err) => expect(err).toBeInstanceOf(FakeRateLimit),
-    );
-    expect(calls).toBe(1);
-  });
+        }),
+        (err) => expect(err).toBeInstanceOf(FakeRateLimit),
+      );
+      expect(calls).toBe(tc.expectedCalls);
+      if (tc.maxDurationMs !== undefined) {
+        expect(Date.now() - start).toBeLessThan(tc.maxDurationMs);
+      }
+    });
+  }
 
   it("does not retry non-rate-limit errors", async () => {
     let calls = 0;
