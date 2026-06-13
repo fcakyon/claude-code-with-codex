@@ -40,6 +40,26 @@ export interface AnthropicNonStreamUsage {
   cache_read_input_tokens: number;
 }
 
+export type AnthropicTextContent = { type: "text"; text: string };
+export type AnthropicThinkingContent = { type: "thinking"; thinking: string; signature: string };
+export type AnthropicToolUseContent = { type: "tool_use"; id: string; name: string; input: unknown };
+
+export type AnthropicNonStreamContent =
+  | AnthropicTextContent
+  | AnthropicThinkingContent
+  | AnthropicToolUseContent;
+
+export interface AnthropicNonStreamResponse<ContentType = AnthropicNonStreamContent> {
+  id: string;
+  type: "message";
+  role: "assistant";
+  model: string;
+  content: Array<ContentType>;
+  stop_reason: "end_turn" | "tool_use" | "max_tokens" | null;
+  stop_sequence: null;
+  usage: AnthropicNonStreamUsage;
+}
+
 export interface CachedInputUsage {
   inputTokens?: number;
   outputTokens?: number;

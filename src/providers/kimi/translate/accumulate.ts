@@ -3,32 +3,13 @@ import { makeThinkingSignature } from "./signature.ts";
 import type { TrafficCapture } from "../../types.ts";
 import {
   collectAnthropicContentFromAccumulatedBlocks,
+  AnthropicNonStreamResponse,
   createBlockAccumulator,
   defaultAnthropicNonStreamUsage,
   parseToolInputJsonOrRaw,
 } from "../../translate/accumulate.ts";
 
 export { UpstreamStreamError } from "./reducer.ts";
-
-export interface AnthropicNonStreamResponse {
-  id: string;
-  type: "message";
-  role: "assistant";
-  model: string;
-  content: Array<
-    | { type: "text"; text: string }
-    | { type: "thinking"; thinking: string; signature: string }
-    | { type: "tool_use"; id: string; name: string; input: unknown }
-  >;
-  stop_reason: "end_turn" | "tool_use" | "max_tokens" | null;
-  stop_sequence: null;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-    cache_creation_input_tokens: number;
-    cache_read_input_tokens: number;
-  };
-}
 
 export interface AccumulatedResponse {
   response: AnthropicNonStreamResponse;
