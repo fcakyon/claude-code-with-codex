@@ -130,28 +130,59 @@ function invalidServiceTierResponse(err: InvalidServiceTierError): Response {
   return jsonError(400, "invalid_request_error", err.message);
 }
 
-async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
-  const log = ctx.childLogger("provider.codex");
+type PrepareCodexRequestResult =
+  | {
+      ok: true;
+      translated: ReturnType<typeof translateRequest>;
+      resolvedModel: string;
+      resolvedServiceTier: ReturnType<typeof resolveModelRequest>["serviceTier"];
+    }
+  | { ok: false; response: Response };
+
+function prepareCodexRequest(
+  body: AnthropicRequest,
+  options: { sessionId?: string } = {},
+): PrepareCodexRequestResult {
   const resolved = resolveModelRequest(body.model);
-  const resolvedModel = resolved.model;
-  let translated;
   try {
-    assertAllowedModel(resolvedModel);
-    translated = translateRequest(
-      { ...body, model: resolvedModel },
-      { serviceTier: resolved.serviceTier },
+    assertAllowedModel(resolved.model);
+    const translated = translateRequest(
+      { ...body, model: resolved.model },
+      { sessionId: options.sessionId, serviceTier: resolved.serviceTier },
     );
+    return {
+      ok: true,
+      translated,
+      resolvedModel: resolved.model,
+      resolvedServiceTier: resolved.serviceTier,
+    };
   } catch (err) {
     if (err instanceof ModelNotAllowedError) {
-      return jsonError(
-        400,
-        "invalid_request_error",
-        `Model "${body.model}" resolves to unsupported model "${err.model}"`,
-      );
+      return {
+        ok: false,
+        response: jsonError(
+          400,
+          "invalid_request_error",
+          `Model "${body.model}" resolves to unsupported model "${err.model}"`,
+        ),
+      };
     }
-    if (err instanceof InvalidServiceTierError) return invalidServiceTierResponse(err);
+    if (err instanceof InvalidServiceTierError) {
+      return {
+        ok: false,
+        response: invalidServiceTierResponse(err),
+      };
+    }
     throw err;
   }
+}
+
+async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
+  const log = ctx.childLogger("provider.codex");
+  const prepared = prepareCodexRequest(body);
+  if (!prepared.ok) return prepared.response;
+  const translated = prepared.translated;
+  const resolvedModel = prepared.resolvedModel;
   const tokens = countTranslatedTokens(translated);
   const messageCount = body.messages?.length ?? 0;
   const toolCount = body.tools?.length ?? 0;
@@ -205,27 +236,10 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
   });
   if (logVerbose()) log.debug("anthropic request body", { body });
 
-  const resolved = resolveModelRequest(body.model);
-  const resolvedModel = resolved.model;
-
-  let translated;
-  try {
-    assertAllowedModel(resolvedModel);
-    translated = translateRequest(
-      { ...body, model: resolvedModel },
-      { sessionId: ctx.sessionId, serviceTier: resolved.serviceTier },
-    );
-  } catch (err) {
-    if (err instanceof ModelNotAllowedError) {
-      return jsonError(
-        400,
-        "invalid_request_error",
-        `Model "${body.model}" resolves to unsupported model "${err.model}"`,
-      );
-    }
-    if (err instanceof InvalidServiceTierError) return invalidServiceTierResponse(err);
-    throw err;
-  }
+  const prepared = prepareCodexRequest(body, { sessionId: ctx.sessionId });
+  if (!prepared.ok) return prepared.response;
+  const translated = prepared.translated;
+  const resolvedModel = prepared.resolvedModel;
   const requestSize = summarizeCodexRequestSize(translated);
   warnForHeavyImages(log, requestSize);
   const localInputTokens = logVerbose() ? countTokens(body) : undefined;
