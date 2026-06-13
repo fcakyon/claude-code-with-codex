@@ -1,11 +1,8 @@
 import { encode } from "gpt-tokenizer/model/gpt-4o";
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import type { KimiChatRequest } from "./translate/request.ts";
-import {
-  flattenSystemText,
-  normalizeContent,
-  toolResultToString,
-} from "../translate/anthropic-content.ts";
+import { flattenSystemText } from "../translate/anthropic-content.ts";
+import { countAnthropicRequestTokens } from "../shared/count-tokens.ts";
 import { countToolSchemaTokens } from "../shared/tool-schema.ts";
 
 const IMAGE_TOKEN_ESTIMATE = 2000;
@@ -16,33 +13,15 @@ export function countTokens(req: AnthropicRequest): number {
   let total = 0;
   const system = flattenSystemText(req.system);
   if (system) total += encode(system).length;
-
-  for (const msg of req.messages) {
-    const blocks = normalizeContent(msg.content);
-    for (const block of blocks) {
-      if (block.type === "text") {
-        total += encode(block.text).length;
-      } else if (block.type === "image") {
-        total += IMAGE_TOKEN_ESTIMATE;
-      } else if (block.type === "tool_use") {
-        total += encode(block.name).length;
-        total += encode(JSON.stringify(block.input ?? {})).length;
-      } else if (block.type === "tool_result") {
-        total += encode(toolResultToString(block.content)).length;
-      } else if (block.type === "thinking") {
-        total += encode(block.thinking).length;
-      }
-    }
-  }
-
-  total += countToolSchemaTokens(
-    req.tools,
-    (tool) => tool.name,
-    (tool) => tool.description,
-    (tool) => tool.input_schema,
-  );
-
-  total += req.messages.length * 4;
+  total += countAnthropicRequestTokens({
+    req,
+    countToken: (value) => encode(value).length,
+    tools: req.tools,
+    readToolName: (tool) => tool.name,
+    readToolDescription: (tool) => tool.description,
+    readToolSchema: (tool) => tool.input_schema,
+    includeThinking: true,
+  });
   return total;
 }
 
