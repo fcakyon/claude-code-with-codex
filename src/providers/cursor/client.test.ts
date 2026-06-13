@@ -118,6 +118,15 @@ function decodeSentFrames(sentFrames: Uint8Array[]): CursorClientMessage[] {
   return sentFrames.map((frameBytes) => decodeFrameJson(frameBytes) as CursorClientMessage);
 }
 
+async function runAndDrainCursorAgentWithFrames(
+  serverFrames: Uint8Array[],
+  runOptions: Partial<CursorRunOptions> = {},
+): Promise<CursorClientMessage[]> {
+  const { upstream, sentFrames } = await runCursorAgentWithFrames(serverFrames, runOptions);
+  await drain(upstream);
+  return decodeSentFrames(sentFrames);
+}
+
 describe("Cursor protocol client", () => {
   it("acks exec setup and KV messages on the HTTP/2 Run stream", async () => {
     const { upstream, sentFrames } = await runCursorAgentWithFrames([
@@ -204,16 +213,13 @@ describe("Cursor protocol client", () => {
     const file = join(dir, "SKILL.md");
     await writeFile(file, "hello\nworld\n", "utf8");
 
-    const { upstream, sentFrames } = await runCursorAgentWithFrames([
+    const clientMessages = await runAndDrainCursorAgentWithFrames([
       buildServerExecFrame(7, "exec-read", {
         case: "readArgs",
         value: { path: file },
       }),
       buildServerStreamCloseFrame(),
     ]);
-    await drain(upstream);
-
-    const clientMessages = decodeSentFrames(sentFrames);
     assertHeartbeatMessage(clientMessages, 1);
     expect(clientMessages[2]).toEqual({
       execClientMessage: {
@@ -236,7 +242,7 @@ describe("Cursor protocol client", () => {
     const dir = await mkdtemp(join(tmpdir(), "cursor-write-"));
     const file = join(dir, "history", "findings.md");
 
-    const { upstream, sentFrames } = await runCursorAgentWithFrames([
+    const clientMessages = await runAndDrainCursorAgentWithFrames([
       buildServerExecFrame(10, "exec-write", {
         case: "writeArgs",
         value: {
@@ -247,9 +253,6 @@ describe("Cursor protocol client", () => {
       }),
       buildServerStreamCloseFrame(),
     ]);
-    await drain(upstream);
-
-    const clientMessages = decodeSentFrames(sentFrames);
     expect(await readFile(file, "utf8")).toBe("finding one\nfinding two\n");
     assertHeartbeatMessage(clientMessages, 1);
     expect(clientMessages[2]).toEqual({
@@ -274,7 +277,7 @@ describe("Cursor protocol client", () => {
     await writeFile(join(dir, "README.md"), "hello\n", "utf8");
     await writeFile(join(dir, "notes.txt"), "hello\n", "utf8");
 
-    const { upstream, sentFrames } = await runCursorAgentWithFrames([
+    const clientMessages = await runAndDrainCursorAgentWithFrames([
       buildServerExecFrame(8, "exec-grep", {
         case: "grepArgs",
         value: {
@@ -286,9 +289,6 @@ describe("Cursor protocol client", () => {
       }),
       buildServerStreamCloseFrame(),
     ]);
-    await drain(upstream);
-
-    const clientMessages = decodeSentFrames(sentFrames);
     assertHeartbeatMessage(clientMessages, 1);
     expect(clientMessages[2]).toEqual({
       execClientMessage: {
