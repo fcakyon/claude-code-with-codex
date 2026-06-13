@@ -109,3 +109,34 @@ export async function collectCursorSse(
   }
   return events;
 }
+
+export function jwt(payload: Record<string, unknown>): string {
+  return [
+    Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
+    Buffer.from(JSON.stringify(payload)).toString("base64url"),
+    "signature",
+  ].join(".");
+}
+
+export function resourceExhaustedFrame(): Uint8Array {
+  return encodeConnectFrame(
+    jsonBytes({
+      error: {
+        code: "resource_exhausted",
+        message: "Error",
+        details: [
+          {
+            debug: {
+              details: {
+                additionalInfo: {
+                  chatMessage: "You've hit your free requests limit.",
+                },
+              },
+            },
+          },
+        ],
+      },
+    }),
+    2,
+  );
+}

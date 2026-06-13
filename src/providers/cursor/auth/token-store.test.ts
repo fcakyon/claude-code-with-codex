@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { loadCursorAuth } from "./token-store.ts";
 import { parseJwtClaims, tokenExpiryMs } from "./jwt.ts";
+import { jwt } from "../cursor-test-helpers.ts";
 
 describe("Cursor auth token discovery", () => {
   it("loads CCP_CURSOR_AUTH_TOKEN without reading Cursor storage", async () => {
@@ -22,11 +23,3 @@ describe("Cursor auth token discovery", () => {
     expect(tokenExpiryMs(token)).toBe(123_000);
   });
 });
-
-function jwt(payload: Record<string, unknown>): string {
-  return [
-    Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
-    Buffer.from(JSON.stringify(payload)).toString("base64url"),
-    "signature",
-  ].join(".");
-}

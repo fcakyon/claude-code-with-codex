@@ -2,12 +2,14 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { cursorProvider, createCursorProvider } from "./index.ts";
 import { encodeConnectFrame, runCursorAgent, type CursorRunOptions } from "./client.ts";
 import {
-  decodeFrameJson,
   collectCursorSse,
+  decodeFrameJson,
   fakeCursorCtx,
   fakeProtoMerged as fakeProto,
   frame,
   jsonBytes,
+  jwt,
+  resourceExhaustedFrame,
   streamFromChunks,
 } from "./cursor-test-helpers.ts";
 import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
@@ -182,26 +184,7 @@ describe("Cursor provider messages", () => {
   it("preserves Cursor Connect end error status for non-streaming requests", async () => {
     const provider = createCursorTestProvider(async () => {
       return streamFromChunks([
-        encodeConnectFrame(
-          jsonBytes({
-            error: {
-              code: "resource_exhausted",
-              message: "Error",
-              details: [
-                {
-                  debug: {
-                    details: {
-                      additionalInfo: {
-                        chatMessage: "You've hit your free requests limit.",
-                      },
-                    },
-                  },
-                },
-              ],
-            },
-          }),
-          2,
-        ),
+        resourceExhaustedFrame(),
       ]);
     });
 
@@ -651,12 +634,4 @@ async function exists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function jwt(payload: Record<string, unknown>): string {
-  return [
-    Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
-    Buffer.from(JSON.stringify(payload)).toString("base64url"),
-    "signature",
-  ].join(".");
 }
