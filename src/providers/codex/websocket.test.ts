@@ -10,15 +10,8 @@ import {
   toWebSocketUrl,
   WEBSOCKET_PROTOCOL_HEADER,
 } from "./websocket.ts";
+import { collect, silentLog } from "./translate/test-helpers.ts";
 import type { ResponsesWebSocketRequest } from "./translate/request.ts";
-
-const silentLog = {
-  debug: () => {},
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-  child: () => silentLog,
-};
 
 const websocketTimeoutMs = {
   connect: 1_000,
@@ -44,17 +37,6 @@ function body(): ResponsesWebSocketRequest {
     store: false,
     stream: true,
   };
-}
-
-async function collect(stream: ReadableStream<Uint8Array>): Promise<string> {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let out = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) return out;
-    out += decoder.decode(value, { stream: true });
-  }
 }
 
 function webSocketRequest(
@@ -122,6 +104,20 @@ async function withCompletionServer(
     close: server.close,
     sockets: () => sockets,
   };
+}
+
+async function withAutoCompletionServer(): Promise<{
+  url: string;
+  close: () => Promise<void>;
+  sockets: () => number;
+}> {
+  return withCompletionServer((socket, socketIndex) => {
+    socket.on("message", () => {
+      socket.send(
+        JSON.stringify({ type: "response.completed", response: { id: `resp_${socketIndex}` } }),
+      );
+    });
+  });
 }
 
 describe("Codex WebSocket helpers", () => {
@@ -235,13 +231,7 @@ describe("Codex WebSocket helpers", () => {
   });
 
   it("reuses a pooled websocket", async () => {
-    const server = await withCompletionServer((socket, socketIndex) => {
-      socket.on("message", () => {
-        socket.send(
-          JSON.stringify({ type: "response.completed", response: { id: `resp_${socketIndex}` } }),
-        );
-      });
-    });
+    const server = await withAutoCompletionServer();
     try {
       const request = () =>
         webSocketRequest(server.url, {
@@ -259,13 +249,7 @@ describe("Codex WebSocket helpers", () => {
   });
 
   it("does not pool websocket requests without a pool key", async () => {
-    const server = await withCompletionServer((socket, socketIndex) => {
-      socket.on("message", () => {
-        socket.send(
-          JSON.stringify({ type: "response.completed", response: { id: `resp_${socketIndex}` } }),
-        );
-      });
-    });
+    const server = await withAutoCompletionServer();
     try {
       const makeRequest = () => webSocketRequest(server.url).then(collect);
 
@@ -276,4 +260,5 @@ describe("Codex WebSocket helpers", () => {
       await server.close();
     }
   });
+
 });

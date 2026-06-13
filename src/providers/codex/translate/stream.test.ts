@@ -63,6 +63,16 @@ function collectFromChunks(
   );
 }
 
+function collectWithTime(chunks: string[]): Promise<string> {
+  return withMockNow(() =>
+    collectFromChunks(chunks, {
+      advance: () => {
+        now += 16_000;
+      },
+    }),
+  );
+}
+
 describe("translateStream", () => {
   it("emits keepalive pings while Read arguments are buffered", async () => {
     const chunks = [
@@ -70,13 +80,7 @@ describe("translateStream", () => {
       sse("response.completed", { response: { usage: {} } }),
     ];
 
-    const output = await withMockNow(() =>
-      collectFromChunks(chunks, {
-        advance: () => {
-          now += 16_000;
-        },
-      }),
-    );
+    const output = await collectWithTime(chunks);
 
     expect(output).toContain("event: content_block_start");
     expect(output).toContain("event: content_block_delta");
@@ -99,13 +103,7 @@ describe("translateStream", () => {
       sse("response.completed", { response: { usage: {} } }),
     ];
 
-    const output = await withMockNow(() =>
-      collectFromChunks(chunks, {
-        advance: () => {
-          now += 16_000;
-        },
-      }),
-    );
+    const output = await collectWithTime(chunks);
 
     expect(output.match(/event: ping/g)?.length).toBeGreaterThanOrEqual(2);
     expect(output).toContain("event: message_stop");
