@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.0.21 (2026-06-15)
 
-- Codex forced hosted web search requests now map to Codex's hosted web search tool choice instead of a function tool choice, fixing repeated upstream `Tool choice 'function' not found in 'tools' parameter.` errors. ([#10](https://github.com/raine/claude-code-proxy/issues/10))
+- Forced Codex web search requests now use hosted web search correctly, fixing repeated upstream `Tool choice 'function' not found in 'tools' parameter.` errors. ([#10](https://github.com/raine/claude-code-proxy/issues/10))
 
 ## v0.0.20 (2026-06-15)
 
