@@ -440,7 +440,6 @@ async function processServerControlFrames(
   const state = controlFrameState.get(append) ?? {
     buffer: Buffer.alloc(0),
     execHeartbeatSent: false,
-    requestContextAcked: false,
   };
   controlFrameState.set(append, state);
   state.buffer = Buffer.concat([state.buffer, Buffer.from(chunk)]);
@@ -462,10 +461,9 @@ async function processServerControlFrames(
         state.execHeartbeatSent = true;
         await append({ execClientControlMessage: { heartbeat: {} } });
       }
-      if (oneof.value?.message?.case === "requestContextArgs" && !state.requestContextAcked) {
-        state.requestContextAcked = true;
+      if (oneof.value?.message?.case === "requestContextArgs") {
         await append({ execClientMessage: buildRequestContextResult(oneof.value) });
-        await append({ execClientControlMessage: { streamClose: {} } });
+        await append({ execClientControlMessage: { streamClose: streamCloseForExec(oneof.value) } });
       } else if (oneof.value?.message?.case === "readArgs") {
         if (readHandler) {
           await readHandler(oneof.value, append);
@@ -997,8 +995,12 @@ function buildInteractionResponse(query: {
 
 const controlFrameState = new WeakMap<
   (messageJson: unknown) => Promise<void>,
-  { buffer: Buffer; execHeartbeatSent: boolean; requestContextAcked: boolean }
+  { buffer: Buffer; execHeartbeatSent: boolean }
 >();
+
+function streamCloseForExec(exec: { id?: number }): Record<string, unknown> {
+  return typeof exec.id === "number" && exec.id !== 0 ? { id: exec.id } : {};
+}
 
 interface CursorOneofMessage {
   message?: {

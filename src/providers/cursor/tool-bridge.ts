@@ -23,6 +23,11 @@ import {
 import type { CursorProto } from "./proto-loader.ts";
 import { cursorUsageToAnthropic } from "./translate/response.ts";
 import { createCursorSseFramer } from "./sse-framing.ts";
+import {
+  CursorToolUseXmlParser,
+  type RecoveredCursorTextEvent,
+  type RecoveredCursorToolUse,
+} from "./tool-use-xml.ts";
 
 interface PendingToolBase {
   toolUseId: string;
@@ -66,6 +71,7 @@ interface CursorBridgeState {
   log: Logger;
   traffic?: RequestContext["traffic"];
   onSession?: (sessionId: string) => void;
+  allowedToolNames?: ReadonlySet<string>;
 }
 
 const bridgeStates = new Map<string, CursorBridgeState>();
@@ -133,6 +139,7 @@ export function createCursorShellToolBridge(opts: {
   traffic?: RequestContext["traffic"];
   proto?: CursorProto;
   onSession?: (sessionId: string) => void;
+  allowedToolNames?: ReadonlySet<string>;
 }): {
   readHandler: (exec: CursorReadExec, append: CursorAppendMessage) => Promise<void>;
   shellStreamHandler: (exec: CursorShellStreamExec, append: CursorAppendMessage) => Promise<void>;
@@ -148,6 +155,7 @@ export function createCursorShellToolBridge(opts: {
     log: opts.log,
     traffic: opts.traffic,
     onSession: opts.onSession,
+    allowedToolNames: opts.allowedToolNames,
   };
 
   const notifyTool = (tool: PendingNativeTool) => {
@@ -331,6 +339,7 @@ function streamBridgeUntilToolOrEnd(
         emit,
         mapUsage: cursorUsageToAnthropic,
       });
+      const toolUseXml = new CursorToolUseXmlParser({ allowedToolNames: state.allowedToolNames });
 
       const emitToolUseAndPause = (tool: PendingNativeTool) => {
         framing.emitToolPauseMessage((index) => {
@@ -354,8 +363,44 @@ function streamBridgeUntilToolOrEnd(
         });
       };
 
+      const emitRecoveredToolUse = (tool: RecoveredCursorToolUse) => {
+        state.traffic?.writeJsonEvent("041-cursor-xml-tool-use", {
+          id: tool.id,
+          originalId: tool.originalId,
+          name: tool.name,
+          inputChars: JSON.stringify(tool.input).length,
+        });
+        framing.closeOpenBlocks();
+        framing.ensureStart();
+        const index = framing.nextContentBlockIndex();
+        emit("content_block_start", {
+          type: "content_block_start",
+          index,
+          content_block: {
+            type: "tool_use",
+            id: tool.id,
+            name: tool.name,
+            input: {},
+          },
+        });
+        emit("content_block_delta", {
+          type: "content_block_delta",
+          index,
+          delta: { type: "input_json_delta", partial_json: JSON.stringify(tool.input) },
+        });
+        emit("content_block_stop", { type: "content_block_stop", index });
+      };
+
+      const applyRecoveredEvent = (event: RecoveredCursorTextEvent) => {
+        if (event.type === "text") {
+          framing.emitTextDelta(event.text);
+          return;
+        }
+        emitRecoveredToolUse(event);
+      };
+
       const emitMessageEnd = () => {
-        framing.emitFinalMessage("end_turn");
+        framing.emitFinalMessage(toolUseXml.sawToolUse ? "tool_use" : "end_turn");
       };
 
       const emitStreamError = (err: unknown) => {
@@ -388,7 +433,7 @@ function streamBridgeUntilToolOrEnd(
               framing.emitThinkingDelta(event.text);
               break;
             case "text_delta":
-              framing.emitTextDelta(event.text);
+              for (const recovered of toolUseXml.push(event.text)) applyRecoveredEvent(recovered);
               break;
             case "usage":
               framing.recordUsage(event.usage);
@@ -397,6 +442,7 @@ function streamBridgeUntilToolOrEnd(
               break;
           }
         }
+        for (const recovered of toolUseXml.flush()) applyRecoveredEvent(recovered);
 
         emitMessageEnd();
         bridgeStates.delete(state.sessionId);

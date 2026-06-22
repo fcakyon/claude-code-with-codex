@@ -74,6 +74,7 @@ async function handleMessages(
   const selectedImages = cursorSelectedImages(body);
   const wantStream = wantsDownstreamStream(body);
   const conversationId = cursorConversationForRequest(body, ctx.sessionId);
+  const allowedToolNames = new Set((body.tools ?? []).map((tool) => tool.name));
 
   log.debug("cursor request", {
     requestedModel: body.model,
@@ -106,6 +107,7 @@ async function handleMessages(
       traffic: ctx.traffic,
       proto: deps.proto,
       onSession,
+      allowedToolNames,
     })
     : undefined;
   const bridgeRead = canBridgeCursorReadTool(body);
@@ -161,6 +163,7 @@ async function handleMessages(
       traffic: ctx.traffic,
       proto: deps.proto,
       onSession,
+      allowedToolNames,
     });
     return sseResponse(stream);
   }
@@ -173,6 +176,7 @@ async function handleMessages(
       traffic: ctx.traffic,
       proto: deps.proto,
       onSession,
+      allowedToolNames,
     });
     return jsonResponse(result.response);
   } catch (err) {

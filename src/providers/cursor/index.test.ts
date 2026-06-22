@@ -307,6 +307,70 @@ describe("Cursor provider messages", () => {
     expectMessageStop(resumeEvents);
   });
 
+  it("recovers XML tool_use text while the native Cursor bridge is active", async () => {
+    const provider = createCursorTestProvider(async () => {
+      return streamFromChunks([
+        frame({
+          interactionUpdate: {
+            textDelta: {
+              text:
+                "Continuing validation: checking the diff.\n\n<tool_use id=\"old_read_id\" name=\"Bash\">\n" +
+                "{\"command\":\"git diff --check && git diff src/operations.rs\",\"description\":\"Check diff whitespace\"}\n" +
+                "</tool_use>\n<tool_use id=\"old_read_id_2\" name=\"Bash\">\n",
+            },
+          },
+        }),
+        frame({
+          interactionUpdate: {
+            textDelta: {
+              text:
+                "{\"command\":\"just check\",\"description\":\"Run project check suite\",\"block_until_ms\":300000}\n</tool_use>\n</tool_use>",
+            },
+          },
+        }),
+        frame({ interactionUpdate: { turnEnded: { inputTokens: "20", outputTokens: "10" } } }),
+        encodeConnectFrame(jsonBytes({}), 2),
+      ]);
+    });
+
+    const response = await provider.handleMessages(
+      {
+        model: "cursor",
+        stream: true,
+        tools: [{ name: "Bash", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "continue" }],
+      },
+      fakeCursorCtx({ sessionId: "session" }),
+    );
+    const events = await collectCursorSse(response);
+    const text = events
+      .filter((event) => event.event === "content_block_delta" && event.data.delta?.type === "text_delta")
+      .map((event) => event.data.delta.text)
+      .join("");
+    const toolStarts = events.filter((event) =>
+      event.event === "content_block_start" && event.data.content_block?.type === "tool_use"
+    );
+    const inputs = events
+      .filter((event) => event.event === "content_block_delta" && event.data.delta?.type === "input_json_delta")
+      .map((event) => JSON.parse(event.data.delta.partial_json));
+
+    expect(text).toBe("Continuing validation: checking the diff.\n\n");
+    expect(text).not.toContain("<tool_use");
+    expect(toolStarts).toHaveLength(2);
+    expect(toolStarts.map((event) => event.data.content_block.name)).toEqual(["Bash", "Bash"]);
+    expect(toolStarts[0]?.data.content_block.id).toStartWith("call_cursor_");
+    expect(toolStarts[0]?.data.content_block.id).not.toBe("old_read_id");
+    expect(toolStarts[1]?.data.content_block.id).toStartWith("call_cursor_");
+    expect(toolStarts[1]?.data.content_block.id).not.toBe("old_read_id_2");
+    expect(inputs.map((input) => input.command)).toEqual([
+      "git diff --check && git diff src/operations.rs",
+      "just check",
+    ]);
+    expect(inputs[1]?.block_until_ms).toBe(300000);
+    expectMessageStopReason(events, "tool_use");
+    expectMessageStop(events);
+  });
+
   it("denies Cursor shellStreamArgs instead of executing internally when Claude did not advertise Bash", async () => {
     let finalResponseSent = false;
     const dir = await mkdtemp(join(tmpdir(), "cursor-denied-shell-"));

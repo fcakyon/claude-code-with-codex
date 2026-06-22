@@ -149,6 +149,30 @@ describe("Cursor protocol client", () => {
     expect(clientMessages[5]).toEqual({ kvClientMessage: { getBlobResult: {}, id: 2 } });
   });
 
+  it("answers repeated Cursor requestContextArgs messages", async () => {
+    const clientMessages = await runAndDrainCursorAgentWithFrames([
+      buildServerExecFrame(0, undefined, { case: "requestContextArgs", value: {} }),
+      buildServerExecFrame(7, "exec-context", { case: "requestContextArgs", value: {} }),
+      buildServerStreamCloseFrame(),
+    ]);
+
+    assertHeartbeatMessage(clientMessages, 1);
+    expect(clientMessages[2]?.execClientMessage.requestContextResult.success.requestContext).toBeDefined();
+    assertStreamCloseMessage(clientMessages, 3);
+    expect(clientMessages[4]).toMatchObject({
+      execClientMessage: {
+        id: 7,
+        execId: "exec-context",
+        requestContextResult: {
+          success: {
+            requestContext: expect.any(Object),
+          },
+        },
+      },
+    });
+    assertStreamCloseMessage(clientMessages, 5, 7);
+  });
+
   it("sends selected images in the Cursor run request", async () => {
     const { upstream, sentFrames } = await runCursorAgentWithFrames(
       [buildServerStreamCloseFrame()],

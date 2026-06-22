@@ -38,6 +38,7 @@ async function collectDecodedCursorEvents(
 async function translateCursorSse(
   frames: Uint8Array[],
   messageId: string,
+  allowedToolNames?: ReadonlySet<string>,
 ): Promise<Array<{ event: string; data: any }>> {
   const downstream = translateCursorStream(
     streamFromChunks(frames),
@@ -46,6 +47,7 @@ async function translateCursorSse(
       model: "cursor-plan",
       log: createLogger("cursor.response.test"),
       proto: fakeProto,
+      allowedToolNames,
     },
   );
   return collectCursorSse(downstream);
@@ -233,6 +235,49 @@ describe("Cursor response translation", () => {
     expect(events[3]?.data.delta).toEqual({ type: "thinking_delta", thinking: "plan" });
     expect(events[6]?.data.delta).toEqual({ type: "text_delta", text: "done" });
     expect(events[8]?.data.usage.output_tokens).toBe(3);
+  });
+
+  it("recovers XML tool_use text deltas as Anthropic tool calls", async () => {
+    const events = await translateCursorSse(
+      [
+        frame({ interactionUpdate: { textDelta: { text: "Continuing validation.\n\n<tool_" } } }),
+        frame({
+          interactionUpdate: {
+            textDelta: {
+              text:
+                "use id=\"old_history_id\" name=\"Bash\">\n{\"command\":\"git diff --check\",\"description\":\"Check diff\"}\n</tool_use>\n</tool_use>",
+            },
+          },
+        }),
+        frame({ interactionUpdate: { turnEnded: { inputTokens: "8", outputTokens: "3" } } }),
+        encodeConnectFrame(jsonBytes({}), 2),
+      ],
+      "msg_xml_tool",
+      new Set(["Bash"]),
+    );
+
+    const textDeltas = events
+      .filter((event) => event.event === "content_block_delta" && event.data.delta?.type === "text_delta")
+      .map((event) => event.data.delta.text)
+      .join("");
+    const toolStart = events.find((event) =>
+      event.event === "content_block_start" && event.data.content_block?.type === "tool_use"
+    );
+    const inputDelta = events.find((event) =>
+      event.event === "content_block_delta" && event.data.delta?.type === "input_json_delta"
+    );
+    const stopReason = events.find((event) => event.event === "message_delta")?.data.delta.stop_reason;
+
+    expect(textDeltas).toBe("Continuing validation.\n\n");
+    expect(textDeltas).not.toContain("<tool_use");
+    expect(toolStart?.data.content_block.name).toBe("Bash");
+    expect(toolStart?.data.content_block.id).toStartWith("call_cursor_");
+    expect(toolStart?.data.content_block.id).not.toBe("old_history_id");
+    expect(JSON.parse(inputDelta?.data.delta.partial_json)).toEqual({
+      command: "git diff --check",
+      description: "Check diff",
+    });
+    expect(stopReason).toBe("tool_use");
   });
 
   it("emits an Anthropic SSE error for Cursor Connect end errors", async () => {
