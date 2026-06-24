@@ -145,6 +145,16 @@ function overloadChunk(): string {
   });
 }
 
+function retryableServerErrorChunk(): string {
+  return sse("error", {
+    error: {
+      type: "server_error",
+      message:
+        "An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 3f6288fe-aea9-4dcc-b7c9-a354cc765bf2 in your message.",
+    },
+  });
+}
+
 describe("translateStream", () => {
   it("retries overloaded stream errors before downstream output starts", async () => {
     let retryCalls = 0;
@@ -176,6 +186,28 @@ describe("translateStream", () => {
         (entry) => entry.msg === "upstream stream error before downstream output, retrying",
       ),
     ).toBe(true);
+  });
+
+  it("retries generic retryable server errors before downstream output starts", async () => {
+    let retryCalls = 0;
+
+    const output = await collect(
+      translateStream(upstreamFromChunks([retryableServerErrorChunk()]), {
+        messageId: "msg_1",
+        model: "gpt-5.5",
+        log: silentLog,
+        retryUpstream: async () => {
+          retryCalls++;
+          return { body: upstreamFromChunks(textChunks("Recovered")) };
+        },
+        computeRetryDelay: () => ({ waitMs: 0, exceedsBudget: false }),
+      }),
+    );
+
+    expect(retryCalls).toBe(1);
+    expect(output).toContain("Recovered");
+    expect(output).toContain("event: message_stop");
+    expect(output).not.toContain("event: error");
   });
 
   it("does not retry overloaded stream errors after downstream output starts", async () => {

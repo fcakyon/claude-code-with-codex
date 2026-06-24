@@ -9,7 +9,7 @@ import { serverToolUseIdFromCodexWebSearchId } from "./web-search-compat.ts";
 
 export class UpstreamStreamError extends Error {
   constructor(
-    public kind: "rate_limit" | "overloaded" | "failed",
+    public kind: "rate_limit" | "overloaded" | "transient" | "failed",
     message: string,
     public retryAfterSeconds?: number,
   ) {
@@ -665,7 +665,7 @@ function upstreamFailureKind(
     error?: { code?: unknown; type?: unknown };
   },
   message: string,
-): "overloaded" | "failed" {
+): "overloaded" | "transient" | "failed" {
   const status = payload.status ?? payload.status_code;
   const code = payload.response?.error?.code ?? payload.error?.code;
   const type = payload.response?.error?.type ?? payload.error?.type;
@@ -679,7 +679,25 @@ function upstreamFailureKind(
   ) {
     return "overloaded";
   }
+  if (
+    is5xxStatus(status) ||
+    code === "server_error" ||
+    code === "internal_server_error" ||
+    code === "internal_error" ||
+    type === "server_error" ||
+    type === "internal_server_error" ||
+    type === "internal_error" ||
+    lowerMessage.includes("you can retry your request")
+  ) {
+    return "transient";
+  }
   return "failed";
+}
+
+function is5xxStatus(status: unknown): boolean {
+  const value =
+    typeof status === "number" ? status : typeof status === "string" ? Number(status) : NaN;
+  return Number.isInteger(value) && value >= 500 && value < 600;
 }
 
 function retryAfterSecondsFromPayload(payload: {

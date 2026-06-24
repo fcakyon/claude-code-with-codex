@@ -429,11 +429,16 @@ export function translateStream(
   });
 }
 
-function retryableStreamErrorInfo(
-  err: unknown,
-): { kind: "rate_limit" | "overloaded"; retryAfter?: string; message: string } | undefined {
+function retryableStreamErrorInfo(err: unknown):
+  | {
+      kind: "rate_limit" | "overloaded" | "transient";
+      retryAfter?: string;
+      message: string;
+    }
+  | undefined {
   if (!(err instanceof UpstreamStreamError)) return undefined;
-  if (err.kind !== "rate_limit" && err.kind !== "overloaded") return undefined;
+  if (err.kind !== "rate_limit" && err.kind !== "overloaded" && err.kind !== "transient")
+    return undefined;
   return {
     kind: err.kind,
     retryAfter: err.retryAfterSeconds !== undefined ? String(err.retryAfterSeconds) : undefined,
