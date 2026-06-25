@@ -34,6 +34,13 @@ describe("CodexTransportError", () => {
     );
   });
 
+  it("classifies Codex API operation timeouts as retryable transport errors", () => {
+    const err = new TypeError("API Error: The operation timed out.");
+
+    expect(isRetryableCodexTransportError(err)).toBe(true);
+    expect(new CodexTransportError(err).message).toContain("operation timed out");
+  });
+
   it("does not retry abort errors as transport failures", () => {
     expect(isRetryableCodexTransportError(new DOMException("Aborted", "AbortError"))).toBe(false);
   });

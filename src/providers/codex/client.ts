@@ -459,6 +459,7 @@ export function isRetryableCodexTransportError(err: unknown): boolean {
     text.includes("socket connection was closed unexpectedly") ||
     text.includes("connection closed unexpectedly") ||
     text.includes("connection reset") ||
+    text.includes("operation timed out") ||
     text.includes("econnreset") ||
     text.includes("epipe") ||
     text.includes("etimedout") ||
