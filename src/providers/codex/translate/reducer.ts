@@ -739,6 +739,7 @@ function isRetryableTransportOrServerMessage(lowerMessage: string): boolean {
     lowerMessage.includes("socket connection was closed unexpectedly") ||
     lowerMessage.includes("connection closed unexpectedly") ||
     lowerMessage.includes("connection reset") ||
+    lowerMessage.includes("operation timed out") ||
     lowerMessage.includes("econnreset") ||
     lowerMessage.includes("epipe") ||
     lowerMessage.includes("etimedout") ||
