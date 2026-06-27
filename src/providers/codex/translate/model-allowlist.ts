@@ -37,13 +37,24 @@ export function resolveModelRequest(model: string): ResolvedModel {
   // provided model is always used. Empty values fall through to alias
   // resolution.
   const alias = MODEL_ALIASES.get(model) ?? model;
-  const isFastAlias = FAST_MODEL_ALIASES.has(alias);
-  const modelWithoutTier = isFastAlias ? alias.slice(0, -"-fast".length) : alias;
+  const requested = resolveFastModelAlias(alias);
   const override = codexModel();
+  const resolved = override === undefined ? requested : resolveFastModelAlias(override);
 
   return {
-    model: override ?? modelWithoutTier,
-    ...(isFastAlias ? { serviceTier: "priority" } : {}),
+    model: resolved.model,
+    ...(requested.serviceTier === "priority" || resolved.serviceTier === "priority"
+      ? { serviceTier: "priority" }
+      : {}),
+  };
+}
+
+function resolveFastModelAlias(model: string): ResolvedModel {
+  if (!FAST_MODEL_ALIASES.has(model)) return { model };
+
+  return {
+    model: model.slice(0, -"-fast".length),
+    serviceTier: "priority",
   };
 }
 

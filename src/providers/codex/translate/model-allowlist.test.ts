@@ -75,6 +75,14 @@ describe("resolveModel", () => {
     });
   });
 
+  it("model override accepts fast model aliases", () => {
+    loadConfig({ env: { CCP_CODEX_MODEL: "gpt-5.5-fast" }, forceReload: true });
+    expect(resolveModelRequest("gpt-5.4")).toEqual({
+      model: "gpt-5.5",
+      serviceTier: "priority",
+    });
+  });
+
   it("does not strip unsupported fast-looking model names", () => {
     loadConfig({ env: {}, forceReload: true });
     expect(resolveModelRequest("gpt-4.1-fast")).toEqual({ model: "gpt-4.1-fast" });
