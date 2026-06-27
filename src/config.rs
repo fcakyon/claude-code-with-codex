@@ -228,12 +228,11 @@ pub fn kimi_oauth_host() -> String {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(kimi) = file.kimi {
-            if let Some(host) = kimi.oauth_host {
-                return host;
-            }
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(kimi) = file.kimi
+        && let Some(host) = kimi.oauth_host
+    {
+        return host;
     }
     "https://auth.kimi.com".to_string()
 }
@@ -244,12 +243,11 @@ pub fn kimi_base_url() -> String {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(kimi) = file.kimi {
-            if let Some(url) = kimi.base_url {
-                return url;
-            }
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(kimi) = file.kimi
+        && let Some(url) = kimi.base_url
+    {
+        return url;
     }
     "https://api.kimi.com/coding/v1".to_string()
 }
@@ -263,12 +261,11 @@ pub fn kimi_user_agent(default: &str) -> String {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(kimi) = file.kimi {
-            if let Some(ua) = kimi.user_agent {
-                return ua;
-            }
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(kimi) = file.kimi
+        && let Some(ua) = kimi.user_agent
+    {
+        return ua;
     }
     default.to_string()
 }
@@ -286,12 +283,11 @@ pub fn codex_base_url(default: &str) -> String {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(codex) = file.codex {
-            if let Some(url) = codex.base_url {
-                return url;
-            }
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(url) = codex.base_url
+    {
+        return url;
     }
     default.to_string()
 }
@@ -302,12 +298,11 @@ pub fn codex_originator(default: &str) -> String {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(codex) = file.codex {
-            if let Some(val) = codex.originator {
-                return val;
-            }
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(val) = codex.originator
+    {
+        return val;
     }
     default.to_string()
 }
@@ -321,12 +316,11 @@ pub fn codex_user_agent(default: &str) -> String {
         return raw.clone();
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(codex) = file.codex {
-            if let Some(ua) = codex.user_agent {
-                return ua;
-            }
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(ua) = codex.user_agent
+    {
+        return ua;
     }
     default.to_string()
 }
@@ -337,12 +331,11 @@ pub fn codex_previous_response_id() -> bool {
         return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(codex) = file.codex {
-            if let Some(val) = codex.previous_response_id {
-                return val;
-            }
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(val) = codex.previous_response_id
+    {
+        return val;
     }
     false
 }
@@ -353,10 +346,10 @@ pub fn codex_service_tier() -> Option<String> {
         return Some(raw.clone());
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(codex) = file.codex {
-            return codex.service_tier;
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+    {
+        return codex.service_tier;
     }
     None
 }
@@ -367,10 +360,10 @@ pub fn codex_effort() -> Option<String> {
         return Some(raw.clone());
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(codex) = file.codex {
-            return codex.effort;
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+    {
+        return codex.effort;
     }
     None
 }
@@ -381,10 +374,10 @@ pub fn codex_model() -> Option<String> {
         return Some(raw.clone());
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(codex) = file.codex {
-            return codex.model;
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+    {
+        return codex.model;
     }
     None
 }
@@ -425,12 +418,11 @@ pub fn codex_transport() -> CodexTransport {
         return parse_codex_transport(raw).unwrap_or(CodexTransport::Http);
     }
     let config_dir = paths::config_dir();
-    if let Some(file) = read_file_config(&config_dir) {
-        if let Some(codex) = file.codex {
-            if let Some(transport) = codex.transport.as_deref().and_then(parse_codex_transport) {
-                return transport;
-            }
-        }
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(transport) = codex.transport.as_deref().and_then(parse_codex_transport)
+    {
+        return transport;
     }
     CodexTransport::Http
 }

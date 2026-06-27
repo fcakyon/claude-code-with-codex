@@ -109,10 +109,10 @@ pub fn invalidate_codex_websocket_pool_key(session_id: &str) {
 fn pool_insert(key: String, entry: Arc<PoolEntry>) {
     let mut guard = WS_POOL.lock().unwrap();
     // Evict oldest if at capacity
-    if guard.len() >= MAX_POOL_ENTRIES {
-        if let Some(oldest_key) = guard.keys().next().cloned() {
-            guard.remove(&oldest_key);
-        }
+    if guard.len() >= MAX_POOL_ENTRIES
+        && let Some(oldest_key) = guard.keys().next().cloned()
+    {
+        guard.remove(&oldest_key);
     }
     // Evict expired entries
     let now = now_ms();
@@ -202,10 +202,9 @@ fn is_previous_response_missing(payload: &serde_json::Value) -> bool {
         .get("error")
         .and_then(|e| e.get("code"))
         .and_then(|v| v.as_str())
+        && code == "previous_response_not_found"
     {
-        if code == "previous_response_not_found" {
-            return true;
-        }
+        return true;
     }
     // Case-insensitive message check
     if let Some(msg) = payload
@@ -242,6 +241,7 @@ fn extract_retry_after(payload: &serde_json::Value) -> Option<String> {
 // Main request function
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub async fn codex_websocket_request(
     url: &str,
     headers: &HeaderMap,
@@ -288,29 +288,29 @@ pub async fn codex_websocket_request(
 
             // Collect events
             let (sse_body, terminal_event) =
-                collect_ws_events(&mut *ws_guard, idle_timeout_ms, pool_key).await?;
+                collect_ws_events(&mut ws_guard, idle_timeout_ms, pool_key).await?;
 
             // Record continuation on success
-            if let Some(terminal) = &terminal_event {
-                if terminal.payload.get("response").is_some() {
-                    // Record continuation for successful responses
-                    if let Some(key) = pool_key {
-                        invalidate_codex_websocket_pool_key(key);
-                    }
+            if let Some(terminal) = &terminal_event
+                && terminal.payload.get("response").is_some()
+            {
+                // Record continuation for successful responses
+                if let Some(key) = pool_key {
+                    invalidate_codex_websocket_pool_key(key);
                 }
             }
 
             // Handle previous response missing
-            if let Some(terminal) = &terminal_event {
-                if is_previous_response_missing(&terminal.payload) {
-                    return Err(CodexError {
-                        status: 0,
-                        message: "Previous response not found".to_string(),
-                        detail: Some("previous_response_not_found".to_string()),
-                        retry_after: None,
-                        origin: CodexErrorOrigin::WebSocket,
-                    });
-                }
+            if let Some(terminal) = &terminal_event
+                && is_previous_response_missing(&terminal.payload)
+            {
+                return Err(CodexError {
+                    status: 0,
+                    message: "Previous response not found".to_string(),
+                    detail: Some("previous_response_not_found".to_string()),
+                    retry_after: None,
+                    origin: CodexErrorOrigin::WebSocket,
+                });
             }
 
             // Extract status from error events
@@ -365,21 +365,21 @@ pub async fn codex_websocket_request(
         })?;
 
         let (sse_body, terminal_event) =
-            collect_ws_events(&mut *ws_guard, idle_timeout_ms, pool_key).await?;
+            collect_ws_events(&mut ws_guard, idle_timeout_ms, pool_key).await?;
 
-        if let Some(terminal) = &terminal_event {
-            if is_previous_response_missing(&terminal.payload) {
-                if let Some(key) = pool_key {
-                    invalidate_codex_websocket_pool_key(key);
-                }
-                return Err(CodexError {
-                    status: 0,
-                    message: "Previous response not found".to_string(),
-                    detail: Some("previous_response_not_found".to_string()),
-                    retry_after: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                });
+        if let Some(terminal) = &terminal_event
+            && is_previous_response_missing(&terminal.payload)
+        {
+            if let Some(key) = pool_key {
+                invalidate_codex_websocket_pool_key(key);
             }
+            return Err(CodexError {
+                status: 0,
+                message: "Previous response not found".to_string(),
+                detail: Some("previous_response_not_found".to_string()),
+                retry_after: None,
+                origin: CodexErrorOrigin::WebSocket,
+            });
         }
 
         // Pool the connection if we have a key and it was successful
@@ -415,11 +415,11 @@ pub async fn codex_websocket_request(
             tc.write_json("022-upstream-websocket-metadata", &meta);
         }
 
-        return Ok(CodexResponse {
+        Ok(CodexResponse {
             body: sse_body,
             status,
             headers: vec![],
-        });
+        })
     }
 }
 

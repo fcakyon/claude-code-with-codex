@@ -107,6 +107,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
         },
         Tool {
             index: usize,
+            #[allow(dead_code)]
             output_index: usize,
             call_id: String,
             name: String,
@@ -402,12 +403,10 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
             };
             if let Some(BlockState::Tool { args_accum, .. }) =
                 blocks_by_output_index.get_mut(&output_index)
+                && let Some(args) = p.get("arguments").and_then(|v| v.as_str())
+                && args_accum.is_empty()
             {
-                if let Some(args) = p.get("arguments").and_then(|v| v.as_str()) {
-                    if args_accum.is_empty() {
-                        *args_accum = args.to_string();
-                    }
-                }
+                *args_accum = args.to_string();
             }
             continue;
         }
@@ -418,24 +417,24 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
             let item = p.get("item");
 
             // Handle web search call done
-            if let Some(item_val) = item {
-                if item_val.get("type").and_then(|v| v.as_str()) == Some("web_search_call") {
-                    let idx = anthropic_index;
-                    anthropic_index += 1;
-                    let result_index = anthropic_index;
-                    anthropic_index += 1;
-                    web_search_requests += 1;
-                    let id_val = item_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    let id = server_tool_use_id_from_codex_web_search_id(id_val);
-                    let query = web_search_query(item_val);
-                    out.push(ReducerEvent::WebSearch {
-                        index: idx,
-                        result_index,
-                        id,
-                        query,
-                    });
-                    continue;
-                }
+            if let Some(item_val) = item
+                && item_val.get("type").and_then(|v| v.as_str()) == Some("web_search_call")
+            {
+                let idx = anthropic_index;
+                anthropic_index += 1;
+                let result_index = anthropic_index;
+                anthropic_index += 1;
+                web_search_requests += 1;
+                let id_val = item_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let id = server_tool_use_id_from_codex_web_search_id(id_val);
+                let query = web_search_query(item_val);
+                out.push(ReducerEvent::WebSearch {
+                    index: idx,
+                    result_index,
+                    id,
+                    query,
+                });
+                continue;
             }
 
             let state = blocks_by_output_index.remove(&output_index);
@@ -584,7 +583,7 @@ fn sanitize_tool_args(name: &str, args: &str) -> String {
     let has_empty_pages = obj
         .get("pages")
         .and_then(|v| v.as_str())
-        .map_or(false, |s| s.is_empty());
+        .is_some_and(|s| s.is_empty());
     if !has_empty_pages {
         return args.to_string();
     }
@@ -652,7 +651,7 @@ fn upstream_failure_kind(payload: &serde_json::Value, message: &str) -> Upstream
         return UpstreamErrorKind::Overloaded;
     }
 
-    if (status.map_or(false, |s| (500..600).contains(&s)))
+    if (status.is_some_and(|s| (500..600).contains(&s)))
         || code == Some("server_error")
         || code == Some("internal_server_error")
         || code == Some("internal_error")
@@ -721,12 +720,12 @@ pub fn map_codex_usage_to_anthropic(
         server_tool_use: None,
     };
 
-    if let Some(requests) = web_search_requests {
-        if requests > 0 {
-            result.server_tool_use = Some(WebSearchUsage {
-                web_search_requests: requests,
-            });
-        }
+    if let Some(requests) = web_search_requests
+        && requests > 0
+    {
+        result.server_tool_use = Some(WebSearchUsage {
+            web_search_requests: requests,
+        });
     }
 
     result

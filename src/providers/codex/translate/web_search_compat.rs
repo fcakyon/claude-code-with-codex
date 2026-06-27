@@ -133,7 +133,7 @@ fn clean_title(value: &str) -> String {
     let no_markers = value
         .trim_start()
         .trim_start_matches(|c: char| c == '-' || c == '*' || c == '+' || c.is_ascii_digit())
-        .trim_start_matches(|c: char| c == '.' || c == ')' || c == ' ')
+        .trim_start_matches(['.', ')', ' '])
         .replace("**", "")
         .replace('`', "")
         .trim()

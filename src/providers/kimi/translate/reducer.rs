@@ -89,6 +89,7 @@ struct StreamChoice {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct StreamDelta {
+    #[allow(dead_code)]
     #[serde(default)]
     role: Option<String>,
     #[serde(default)]
@@ -104,6 +105,7 @@ struct StreamToolCall {
     index: usize,
     #[serde(default)]
     id: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     r#type: Option<String>,
     #[serde(default)]
@@ -150,6 +152,7 @@ struct CompletionTokensDetails {
 struct StreamError {
     #[serde(default)]
     message: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     r#type: Option<String>,
 }
@@ -217,93 +220,93 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
         };
 
         // Reasoning content
-        if let Some(ref reasoning) = delta.reasoning_content {
-            if !reasoning.is_empty() {
-                if thinking_index.is_none() {
-                    thinking_index = Some(next_block_index);
-                    next_block_index += 1;
-                    out.push(ReducerEvent::ThinkingStart {
-                        index: thinking_index.unwrap(),
-                    });
-                }
-                out.push(ReducerEvent::ThinkingDelta {
+        if let Some(ref reasoning) = delta.reasoning_content
+            && !reasoning.is_empty()
+        {
+            if thinking_index.is_none() {
+                thinking_index = Some(next_block_index);
+                next_block_index += 1;
+                out.push(ReducerEvent::ThinkingStart {
                     index: thinking_index.unwrap(),
-                    text: reasoning.clone(),
                 });
             }
+            out.push(ReducerEvent::ThinkingDelta {
+                index: thinking_index.unwrap(),
+                text: reasoning.clone(),
+            });
         }
 
         // Content text
-        if let Some(ref content) = delta.content {
-            if !content.is_empty() {
-                // Close thinking before text
-                if let Some(ti) = thinking_index.take() {
-                    out.push(ReducerEvent::ThinkingStop { index: ti });
-                }
-                if text_index.is_none() {
-                    text_index = Some(next_block_index);
-                    next_block_index += 1;
-                    out.push(ReducerEvent::TextStart {
-                        index: text_index.unwrap(),
-                    });
-                }
-                out.push(ReducerEvent::TextDelta {
+        if let Some(ref content) = delta.content
+            && !content.is_empty()
+        {
+            // Close thinking before text
+            if let Some(ti) = thinking_index.take() {
+                out.push(ReducerEvent::ThinkingStop { index: ti });
+            }
+            if text_index.is_none() {
+                text_index = Some(next_block_index);
+                next_block_index += 1;
+                out.push(ReducerEvent::TextStart {
                     index: text_index.unwrap(),
-                    text: content.clone(),
                 });
             }
+            out.push(ReducerEvent::TextDelta {
+                index: text_index.unwrap(),
+                text: content.clone(),
+            });
         }
 
         // Tool calls
-        if let Some(ref tool_calls) = delta.tool_calls {
-            if !tool_calls.is_empty() {
-                // Close thinking and text before tools
-                if let Some(ti) = thinking_index.take() {
-                    out.push(ReducerEvent::ThinkingStop { index: ti });
-                }
-                if let Some(ti) = text_index.take() {
-                    out.push(ReducerEvent::TextStop { index: ti });
-                }
+        if let Some(ref tool_calls) = delta.tool_calls
+            && !tool_calls.is_empty()
+        {
+            // Close thinking and text before tools
+            if let Some(ti) = thinking_index.take() {
+                out.push(ReducerEvent::ThinkingStop { index: ti });
+            }
+            if let Some(ti) = text_index.take() {
+                out.push(ReducerEvent::TextStop { index: ti });
+            }
 
-                for tc in tool_calls {
-                    let existing_pos = tool_slots.iter().position(|s| s.block_index == tc.index);
-                    let block_index = if let Some(pos) = existing_pos {
-                        tool_slots[pos].block_index
-                    } else {
-                        let id = tc.id.clone().unwrap_or_default();
-                        let name = tc
-                            .function
-                            .as_ref()
-                            .and_then(|f| f.name.clone())
-                            .unwrap_or_default();
-                        if id.is_empty() || name.is_empty() {
-                            // Defensive: skip out-of-order fragments
-                            continue;
-                        }
-                        saw_tool_calls = true;
-                        let bi = next_block_index;
-                        next_block_index += 1;
-                        tool_slots.push(ToolSlot {
-                            block_index: bi,
-                            id: id.clone(),
-                            name: name.clone(),
-                        });
-                        out.push(ReducerEvent::ToolStart {
-                            index: bi,
-                            id,
-                            name,
-                        });
-                        bi
-                    };
-
-                    if let Some(args) = tc.function.as_ref().and_then(|f| f.arguments.as_ref()) {
-                        if !args.is_empty() {
-                            out.push(ReducerEvent::ToolDelta {
-                                index: block_index,
-                                partial_json: args.to_string(),
-                            });
-                        }
+            for tc in tool_calls {
+                let existing_pos = tool_slots.iter().position(|s| s.block_index == tc.index);
+                let block_index = if let Some(pos) = existing_pos {
+                    tool_slots[pos].block_index
+                } else {
+                    let id = tc.id.clone().unwrap_or_default();
+                    let name = tc
+                        .function
+                        .as_ref()
+                        .and_then(|f| f.name.clone())
+                        .unwrap_or_default();
+                    if id.is_empty() || name.is_empty() {
+                        // Defensive: skip out-of-order fragments
+                        continue;
                     }
+                    saw_tool_calls = true;
+                    let bi = next_block_index;
+                    next_block_index += 1;
+                    tool_slots.push(ToolSlot {
+                        block_index: bi,
+                        id: id.clone(),
+                        name: name.clone(),
+                    });
+                    out.push(ReducerEvent::ToolStart {
+                        index: bi,
+                        id,
+                        name,
+                    });
+                    bi
+                };
+
+                if let Some(args) = tc.function.as_ref().and_then(|f| f.arguments.as_ref())
+                    && !args.is_empty()
+                {
+                    out.push(ReducerEvent::ToolDelta {
+                        index: block_index,
+                        partial_json: args.to_string(),
+                    });
                 }
             }
         }
@@ -485,7 +488,7 @@ mod tests {
 
     #[test]
     fn reducer_returns_error_on_upstream_error() {
-        let upstream = concat!("data: {\"error\":{\"message\":\"rate limit exceeded\"}}\n\n",);
+        let upstream = "data: {\"error\":{\"message\":\"rate limit exceeded\"}}\n\n";
         let result = reduce_upstream_bytes(upstream.as_bytes());
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind, UpstreamErrorKind::Failed);

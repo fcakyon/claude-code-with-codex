@@ -5,7 +5,6 @@ use super::translate::request::{
 /// Approximate token counter for Codex translated requests.
 /// Uses a simple monotonic estimator that satisfies Claude Code's
 /// compaction logic (needs approximate, not exact counts).
-
 pub fn count_translated_tokens(translated: &ResponsesRequest) -> u64 {
     let mut total = 0u64;
 

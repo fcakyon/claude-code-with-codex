@@ -114,7 +114,7 @@ pub fn summarize_codex_request_size(body: &ResponsesRequest) -> CodexRequestSize
                 }
             })
             .collect();
-        items.sort_by(|a, b| b.json_bytes.cmp(&a.json_bytes));
+        items.sort_by_key(|item| std::cmp::Reverse(item.json_bytes));
         items.truncate(5);
         items
     };
@@ -136,7 +136,7 @@ pub fn summarize_codex_request_size(body: &ResponsesRequest) -> CodexRequestSize
                 }
             })
             .collect();
-        items.sort_by(|a, b| b.image_url_bytes.cmp(&a.image_url_bytes));
+        items.sort_by_key(|item| std::cmp::Reverse(item.image_url_bytes));
         items.truncate(5);
         items
     };
@@ -158,7 +158,7 @@ pub fn summarize_codex_request_size(body: &ResponsesRequest) -> CodexRequestSize
                 });
             }
         }
-        items.sort_by(|a, b| b.json_bytes.cmp(&a.json_bytes));
+        items.sort_by_key(|item| std::cmp::Reverse(item.json_bytes));
         items.truncate(5);
         items
     };

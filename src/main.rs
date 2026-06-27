@@ -69,7 +69,7 @@ fn main() -> Result<()> {
     match commands {
         Commands::Version => {
             println!("claude-code-proxy {}", VERSION);
-            return Ok(());
+            Ok(())
         }
         Commands::Serve { port } => {
             let effective_port = port.unwrap_or_else(config::port);

@@ -15,6 +15,7 @@ use tokio_tungstenite::{WebSocketStream, accept_async, accept_hdr_async, connect
 /// Spawn a WebSocket mock server that accepts one connection, captures
 /// handshake headers, reads one text message, and calls `handler` with
 /// headers and the stream. Returns the listener address as `http://addr/...`.
+#[allow(clippy::result_large_err)]
 async fn websocket_mock<F, Fut>(handler: F) -> String
 where
     F: Fn(http::HeaderMap, WebSocketStream<TcpStream>) -> Fut + Send + 'static,
@@ -26,10 +27,7 @@ where
     let ch = captured_headers.clone();
 
     tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
+        if let Ok((stream, _)) = listener.accept().await {
             let ch = ch.clone();
             let ws = accept_hdr_async(stream, |req: &http::Request<()>, resp| {
                 let mut guard = ch.try_lock().unwrap();
@@ -40,8 +38,6 @@ where
             .unwrap();
             let headers = captured_headers.lock().await.clone().unwrap_or_default();
             tokio::spawn(handler(headers, ws));
-            // Only handle one connection per test
-            break;
         }
     });
 
@@ -92,7 +88,7 @@ async fn websocket_concurrent_requests() {
                     "input": [{"role":"user","content":[{"type":"input_text","text":format!("msg {i}")}]}]
                 });
                 let _ = writer
-                    .send(Message::Text(serde_json::to_string(&req).unwrap().into()))
+                    .send(Message::Text(serde_json::to_string(&req).unwrap()))
                     .await;
             }
         }));
@@ -146,7 +142,7 @@ async fn websocket_request_serializes_response_create() {
         "text": {"verbosity": "low"},
     });
     writer
-        .send(Message::Text(serde_json::to_string(&req).unwrap().into()))
+        .send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
 }
@@ -183,21 +179,18 @@ async fn websocket_collects_sse_events_until_terminal() {
 
     let req = serde_json::json!({"type": "response.create", "model": "gpt-5.5", "input": []});
     writer
-        .send(Message::Text(serde_json::to_string(&req).unwrap().into()))
+        .send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
     drop(writer);
 
     let mut sse_body = Vec::new();
-    loop {
-        match tokio::time::timeout(Duration::from_millis(500), reader.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                sse_body.extend_from_slice(&sse_data(&text));
-                if text.contains("response.completed") {
-                    break;
-                }
-            }
-            _ => break,
+    while let Ok(Some(Ok(Message::Text(text)))) =
+        tokio::time::timeout(Duration::from_millis(500), reader.next()).await
+    {
+        sse_body.extend_from_slice(&sse_data(&text));
+        if text.contains("response.completed") {
+            break;
         }
     }
 
@@ -242,22 +235,17 @@ async fn websocket_idle_timeout_no_events() {
 
     let req = serde_json::json!({"type": "response.create", "model": "gpt-5.5", "input": []});
     writer
-        .send(Message::Text(serde_json::to_string(&req).unwrap().into()))
+        .send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
     drop(writer);
 
     let timeout = tokio::time::timeout(Duration::from_millis(100), async {
-        loop {
-            match reader.next().await {
-                Some(Ok(Message::Text(_))) => continue,
-                _ => break,
-            }
-        }
+        while let Some(Ok(Message::Text(_))) = reader.next().await {}
     })
     .await;
 
-    assert!(timeout.is_err() || timeout.unwrap() == ());
+    assert!(timeout.is_err() || timeout.is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -282,23 +270,20 @@ async fn websocket_invalidation_on_error() {
 
     let req = serde_json::json!({"type": "response.create", "model": "gpt-5.5", "input": []});
     writer
-        .send(Message::Text(serde_json::to_string(&req).unwrap().into()))
+        .send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
     drop(writer);
 
     let mut got_error = false;
-    loop {
-        match tokio::time::timeout(Duration::from_millis(500), reader.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                if text.contains("response.failed") {
-                    got_error = true;
-                }
-                if text.contains("response.failed") || text.contains("response.completed") {
-                    break;
-                }
-            }
-            _ => break,
+    while let Ok(Some(Ok(Message::Text(text)))) =
+        tokio::time::timeout(Duration::from_millis(500), reader.next()).await
+    {
+        if text.contains("response.failed") {
+            got_error = true;
+        }
+        if text.contains("response.failed") || text.contains("response.completed") {
+            break;
         }
     }
     assert!(got_error, "expected response.failed event");
@@ -314,7 +299,7 @@ async fn websocket_soak_concurrent_requests() {
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let counter_clone = counter.clone();
+    let _counter_clone = counter.clone();
 
     let server_handle = tokio::spawn(async move {
         for _ in 0..total {
@@ -344,7 +329,7 @@ async fn websocket_soak_concurrent_requests() {
                     "input": [{"role":"user","content":[{"type":"input_text","text":format!("soak {i}")}]}]
                 });
                 let _ = writer
-                    .send(Message::Text(serde_json::to_string(&req).unwrap().into()))
+                    .send(Message::Text(serde_json::to_string(&req).unwrap()))
                     .await;
                 drop(writer);
                 let _ = tokio::time::timeout(Duration::from_millis(500), reader.next()).await;

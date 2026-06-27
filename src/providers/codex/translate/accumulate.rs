@@ -49,10 +49,10 @@ pub fn accumulate_response(
                 });
             }
             ReducerEvent::TextDelta { index, text } => {
-                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index) {
-                    if let BlockKind::Text { text: t } = &mut block.kind {
-                        t.push_str(text);
-                    }
+                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index)
+                    && let BlockKind::Text { text: t } = &mut block.kind
+                {
+                    t.push_str(text);
                 }
                 deferred_text_parts.push(text.clone());
             }
@@ -70,10 +70,10 @@ pub fn accumulate_response(
                 index,
                 partial_json,
             } => {
-                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index) {
-                    if let BlockKind::Tool { args, .. } = &mut block.kind {
-                        args.push_str(partial_json);
-                    }
+                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index)
+                    && let BlockKind::Tool { args, .. } = &mut block.kind
+                {
+                    args.push_str(partial_json);
                 }
             }
             ReducerEvent::Finish {

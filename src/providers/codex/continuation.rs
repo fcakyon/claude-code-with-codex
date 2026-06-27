@@ -187,17 +187,17 @@ pub fn clear_continuation(session_id: Option<&str>) {
         None => return,
     };
     let mut guard = STATES.lock().unwrap();
-    if let Some(map) = guard.as_mut() {
-        if let Some(existing) = map.remove(session_id) {
-            let mut bytes_guard = TOTAL_TRANSCRIPT_BYTES.lock().unwrap();
-            *bytes_guard = bytes_guard.saturating_sub(existing.transcript_bytes);
-        }
+    if let Some(map) = guard.as_mut()
+        && let Some(existing) = map.remove(session_id)
+    {
+        let mut bytes_guard = TOTAL_TRANSCRIPT_BYTES.lock().unwrap();
+        *bytes_guard = bytes_guard.saturating_sub(existing.transcript_bytes);
     }
 }
 
 pub fn has_continuation_for_tests(session_id: &str) -> bool {
     let guard = STATES.lock().unwrap();
-    guard.as_ref().map_or(false, |m| m.contains_key(session_id))
+    guard.as_ref().is_some_and(|m| m.contains_key(session_id))
 }
 
 pub fn clear_all_continuations_for_tests() {
@@ -232,7 +232,7 @@ fn prompt_signature(body: &ResponsesRequest) -> String {
     };
     let mut entries: Vec<(&String, &serde_json::Value)> =
         obj.iter().filter(|(k, _)| *k != "input").collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries.sort_by_key(|(a, _)| *a);
     let mut sig = String::from("{");
     for (i, (key, val)) in entries.iter().enumerate() {
         if i > 0 {
@@ -256,7 +256,7 @@ fn stable_json(value: &serde_json::Value) -> String {
         }
         serde_json::Value::Object(obj) => {
             let mut entries: Vec<(&String, &serde_json::Value)> = obj.iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            entries.sort_by_key(|(a, _)| *a);
             let items: Vec<String> = entries
                 .iter()
                 .map(|(k, v)| {
@@ -308,11 +308,11 @@ mod tests {
         fields.insert("stream".into(), json!(true));
         fields.insert("text".into(), json!({"verbosity": "low"}));
         fields.insert("parallel_tool_calls".into(), json!(true));
-        if let Some(extras) = extra {
-            if let Some(obj) = extras.as_object() {
-                for (k, v) in obj {
-                    fields.insert(k.clone(), v.clone());
-                }
+        if let Some(extras) = extra
+            && let Some(obj) = extras.as_object()
+        {
+            for (k, v) in obj {
+                fields.insert(k.clone(), v.clone());
             }
         }
         serde_json::from_value(serde_json::Value::Object(fields)).unwrap()

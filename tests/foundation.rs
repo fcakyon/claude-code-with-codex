@@ -115,11 +115,10 @@ fn traffic_capture_helpers() {
 
     assert_eq!(sanitize_path_part("a*b@c/def"), "a_b_c_def");
     let path = sanitize_path_part(
-        &"/a\
-/path"
-            .to_string(),
+        "/a\
+/path",
     );
-    assert_eq!(path.chars().all(|ch| ch != '/'), true);
+    assert!(path.chars().all(|ch| ch != '/'));
 
     let sample = json!({"access_token":"abc","nested":{"chatgpt-account-id":"x","value":1}});
     let redacted = redact_traffic(&sample);

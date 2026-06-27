@@ -51,10 +51,10 @@ pub fn accumulate_response(
                 });
             }
             ReducerEvent::ThinkingDelta { index, text } => {
-                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index) {
-                    if let BlockKind::Thinking { text: t } = &mut block.kind {
-                        t.push_str(text);
-                    }
+                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index)
+                    && let BlockKind::Thinking { text: t } = &mut block.kind
+                {
+                    t.push_str(text);
                 }
             }
             ReducerEvent::TextStart { index } => {
@@ -66,10 +66,10 @@ pub fn accumulate_response(
                 });
             }
             ReducerEvent::TextDelta { index, text } => {
-                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index) {
-                    if let BlockKind::Text { text: t } = &mut block.kind {
-                        t.push_str(text);
-                    }
+                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index)
+                    && let BlockKind::Text { text: t } = &mut block.kind
+                {
+                    t.push_str(text);
                 }
             }
             ReducerEvent::ToolStart { index, id, name } => {
@@ -86,10 +86,10 @@ pub fn accumulate_response(
                 index,
                 partial_json,
             } => {
-                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index) {
-                    if let BlockKind::Tool { args, .. } = &mut block.kind {
-                        args.push_str(partial_json);
-                    }
+                if let Some(block) = blocks.iter_mut().rev().find(|b| b.index == *index)
+                    && let BlockKind::Tool { args, .. } = &mut block.kind
+                {
+                    args.push_str(partial_json);
                 }
             }
             ReducerEvent::Finish {
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn accumulate_handles_upstream_error() {
-        let upstream = concat!("data: {\"error\":{\"message\":\"upstream failure\"}}\n\n",);
+        let upstream = "data: {\"error\":{\"message\":\"upstream failure\"}}\n\n";
         let result = accumulate_response(upstream.as_bytes(), "msg_e", "model");
         assert!(result.is_err());
     }

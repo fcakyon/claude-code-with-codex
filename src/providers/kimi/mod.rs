@@ -28,6 +28,12 @@ fn now_ms() -> u64 {
 
 pub struct KimiProvider;
 
+impl Default for KimiProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KimiProvider {
     pub fn new() -> Self {
         Self

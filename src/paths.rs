@@ -107,7 +107,8 @@ pub fn provider_legacy_auth_file(provider: &str) -> PathBuf {
 }
 
 fn join_with_sep(base: &str, parts: &[&str], win32: bool) -> PathBuf {
-    let sep = if win32 { '/' } else { '/' };
+    let sep = '/';
+    let _ = win32;
     let mut out = String::new();
     for part in std::iter::once(base).chain(parts.iter().copied()) {
         if !out.is_empty() && !out.ends_with(sep) {

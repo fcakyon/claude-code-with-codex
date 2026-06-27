@@ -26,6 +26,12 @@ pub struct KimiHttpClient {
     auth_manager: KimiAuthManager<crate::auth::FileAuthStore<StoredAuth>>,
 }
 
+impl Default for KimiHttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KimiHttpClient {
     pub fn new() -> Self {
         Self {
@@ -118,10 +124,10 @@ impl KimiHttpClient {
 
         // Add common headers
         for (k, v) in &headers {
-            if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
-                if let Ok(value) = reqwest::header::HeaderValue::from_str(v) {
-                    req_builder = req_builder.header(name, value);
-                }
+            if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes())
+                && let Ok(value) = reqwest::header::HeaderValue::from_str(v)
+            {
+                req_builder = req_builder.header(name, value);
             }
         }
 

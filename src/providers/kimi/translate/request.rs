@@ -380,7 +380,7 @@ fn push_user_messages(out: &mut Vec<KimiMessage>, blocks: &[ContentBlock]) {
                 content: Value::String(joined),
             });
         } else {
-            let parts: Vec<KimiUserContentPart> = buffer.drain(..).collect();
+            let parts: Vec<KimiUserContentPart> = std::mem::take(buffer);
             out.push(KimiMessage::User {
                 role: "user".to_string(),
                 content: serde_json::to_value(parts).unwrap_or_default(),
@@ -481,10 +481,10 @@ fn tool_result_content(content: &Value, is_error: Option<bool>) -> Value {
             }
 
             // Collapse to string when only one text part
-            if parts.len() == 1 {
-                if let KimiToolResultPart::Text { text } = &parts[0] {
-                    return Value::String(text.clone());
-                }
+            if parts.len() == 1
+                && let KimiToolResultPart::Text { text } = &parts[0]
+            {
+                return Value::String(text.clone());
             }
 
             serde_json::to_value(parts).unwrap_or(Value::String(prefix.to_string()))

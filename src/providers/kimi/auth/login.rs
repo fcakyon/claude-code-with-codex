@@ -115,10 +115,10 @@ fn build_header_map(
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
     let mut map = HeaderMap::new();
     for (k, v) in headers {
-        if let Ok(name) = HeaderName::from_bytes(k.as_bytes()) {
-            if let Ok(value) = HeaderValue::from_str(v) {
-                map.insert(name, value);
-            }
+        if let Ok(name) = HeaderName::from_bytes(k.as_bytes())
+            && let Ok(value) = HeaderValue::from_str(v)
+        {
+            map.insert(name, value);
         }
     }
     map

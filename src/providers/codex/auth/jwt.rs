@@ -6,6 +6,7 @@ struct IdTokenClaims {
     chatgpt_account_id: Option<String>,
     #[serde(default)]
     organizations: Option<Vec<OrgClaim>>,
+    #[allow(dead_code)]
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
@@ -63,12 +64,11 @@ fn extract_account_id_from_claims(claims: &IdTokenClaims) -> Option<String> {
 }
 
 pub fn extract_account_id(tokens: &TokenResponse) -> Option<String> {
-    if let Some(ref id_token) = tokens.id_token {
-        if let Some(claims) = parse_jwt_claims(id_token) {
-            if let Some(account_id) = extract_account_id_from_claims(&claims) {
-                return Some(account_id);
-            }
-        }
+    if let Some(ref id_token) = tokens.id_token
+        && let Some(claims) = parse_jwt_claims(id_token)
+        && let Some(account_id) = extract_account_id_from_claims(&claims)
+    {
+        return Some(account_id);
     }
     let claims = parse_jwt_claims(&tokens.access_token)?;
     extract_account_id_from_claims(&claims)

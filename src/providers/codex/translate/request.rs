@@ -292,10 +292,10 @@ pub fn translate_request(
         reasoning: None,
     };
 
-    if let Some(tools) = tools {
-        if !tools.is_empty() {
-            out.tools = Some(tools);
-        }
+    if let Some(tools) = tools
+        && !tools.is_empty()
+    {
+        out.tools = Some(tools);
     }
 
     if let Some(sid) = opts.session_id {
@@ -410,7 +410,7 @@ fn read_tools(req: &MessagesRequest) -> Result<Option<Vec<ResponsesTool>>, anyho
                 blocked_domains: None,
             };
             let allowed = tool.get("allowed_domains").and_then(|v| v.as_array());
-            if allowed.map_or(false, |a| !a.is_empty()) {
+            if allowed.is_some_and(|a| !a.is_empty()) {
                 filters.allowed_domains = allowed.map(|a| {
                     a.iter()
                         .filter_map(|v| v.as_str().map(String::from))
@@ -418,7 +418,7 @@ fn read_tools(req: &MessagesRequest) -> Result<Option<Vec<ResponsesTool>>, anyho
                 });
             }
             let blocked = tool.get("blocked_domains").and_then(|v| v.as_array());
-            if blocked.map_or(false, |a| !a.is_empty()) {
+            if blocked.is_some_and(|a| !a.is_empty()) {
                 filters.blocked_domains = blocked.map(|a| {
                     a.iter()
                         .filter_map(|v| v.as_str().map(String::from))
@@ -487,11 +487,9 @@ fn map_tool_choice(req: &MessagesRequest) -> Result<Option<ResponsesToolChoice>,
         "tool" => {
             let name = choice.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let tools = req.extra.get("tools").and_then(|v| v.as_array());
-            let is_web_search = tools.map_or(false, |t| {
+            let is_web_search = tools.is_some_and(|t| {
                 t.iter().any(|tool| {
-                    tool.get("type")
-                        .and_then(|v| v.as_str())
-                        .map_or(false, |t| t == "web_search_20250305")
+                    (tool.get("type").and_then(|v| v.as_str()) == Some("web_search_20250305"))
                         && tool.get("name").and_then(|v| v.as_str()) == Some(name)
                 })
             });

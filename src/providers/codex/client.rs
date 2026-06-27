@@ -194,7 +194,14 @@ pub struct CodexHttpClient {
     auth_manager: CodexAuthManager<crate::auth::FileAuthStore<StoredAuth>>,
     base_url: String,
     header_timeout_ms: u64,
+    #[allow(dead_code)]
     header_timeout_retries: u32,
+}
+
+impl Default for CodexHttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CodexHttpClient {
@@ -286,7 +293,7 @@ impl CodexHttpClient {
                     let pool_key = ctx.session_id.as_deref();
                     let pool_key = continuation
                         .and_then(|c| c.previous_response_id.as_ref())
-                        .and_then(|_| pool_key);
+                        .and(pool_key);
 
                     super::websocket::codex_websocket_request(
                         &self.base_url,
@@ -309,7 +316,7 @@ impl CodexHttpClient {
                     let pool_key = ctx.session_id.as_deref();
                     let pool_key = continuation
                         .and_then(|c| c.previous_response_id.as_ref())
-                        .and_then(|_| pool_key);
+                        .and(pool_key);
 
                     // Try WebSocket first
                     let ws_result = super::websocket::codex_websocket_request(

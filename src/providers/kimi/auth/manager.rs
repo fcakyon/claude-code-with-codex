@@ -158,7 +158,7 @@ impl<S: AuthStorage<StoredAuth>> KimiAuthManager<S> {
         &self,
         tokens: &TokenResponse,
     ) -> Result<StoredAuth, anyhow::Error> {
-        let expires = Self::now_ms() + (tokens.expires_in.unwrap_or(900) as u64 * 1000);
+        let expires = Self::now_ms() + (tokens.expires_in.unwrap_or(900) * 1000);
         let auth = StoredAuth {
             access: tokens.access_token.clone(),
             refresh: tokens.refresh_token.clone().unwrap_or_default(),
@@ -186,10 +186,10 @@ fn build_headers_map(
 ) -> reqwest::header::HeaderMap {
     let mut map = reqwest::header::HeaderMap::new();
     for (k, v) in headers {
-        if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
-            if let Ok(value) = reqwest::header::HeaderValue::from_str(v) {
-                map.insert(name, value);
-            }
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes())
+            && let Ok(value) = reqwest::header::HeaderValue::from_str(v)
+        {
+            map.insert(name, value);
         }
     }
     map

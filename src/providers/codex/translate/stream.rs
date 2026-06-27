@@ -18,6 +18,7 @@ pub fn translate_stream_bytes(
     let mut web_search_events: Vec<ReducerEvent> = Vec::new();
     let mut deferred_content_events: Vec<ReducerEvent> = Vec::new();
 
+    #[allow(dead_code)]
     enum OpenBlock {
         Text,
         Tool { id: String, name: String },

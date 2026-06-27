@@ -37,10 +37,10 @@ fn count_system_tokens(system: &serde_json::Value) -> u64 {
         serde_json::Value::Array(arr) => {
             let mut total = 0u64;
             for block in arr {
-                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                    if !text.starts_with("x-anthropic-billing-header:") {
-                        total += approx_token_count(text);
-                    }
+                if let Some(text) = block.get("text").and_then(|v| v.as_str())
+                    && !text.starts_with("x-anthropic-billing-header:")
+                {
+                    total += approx_token_count(text);
                 }
             }
             total
@@ -89,7 +89,7 @@ fn count_content_block_tokens(_role: &str, block: &serde_json::Value) -> u64 {
         Some("tool_result") => {
             let content = block.get("content");
             let role = "tool";
-            count_message_tokens(role, &content.unwrap_or(&serde_json::Value::Null))
+            count_message_tokens(role, content.unwrap_or(&serde_json::Value::Null))
         }
         _ => 0,
     }
