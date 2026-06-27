@@ -36,6 +36,25 @@ struct FileConfig {
     pub alias_provider: Option<String>,
     pub log: Option<FileLog>,
     pub kimi: Option<KimiConfig>,
+    pub codex: Option<CodexConfig>,
+}
+
+#[derive(Deserialize, Clone)]
+struct CodexConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+    #[serde(rename = "originator")]
+    pub originator: Option<String>,
+    #[serde(rename = "userAgent")]
+    pub user_agent: Option<String>,
+    #[serde(rename = "previousResponseId")]
+    pub previous_response_id: Option<bool>,
+    #[serde(rename = "serviceTier")]
+    pub service_tier: Option<String>,
+    #[serde(rename = "effort")]
+    pub effort: Option<String>,
+    #[serde(rename = "model")]
+    pub model: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -251,4 +270,120 @@ pub fn kimi_user_agent(default: &str) -> String {
         }
     }
     default.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Codex config
+// ---------------------------------------------------------------------------
+
+pub fn codex_base_url(default: &str) -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_BASE_URL") {
+        return raw.clone();
+    }
+    if let Some(raw) = env.get("CLAUDE_CODE_PROXY_CODEX_BASE_URL") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir) {
+        if let Some(codex) = file.codex {
+            if let Some(url) = codex.base_url {
+                return url;
+            }
+        }
+    }
+    default.to_string()
+}
+
+pub fn codex_originator(default: &str) -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_ORIGINATOR") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir) {
+        if let Some(codex) = file.codex {
+            if let Some(val) = codex.originator {
+                return val;
+            }
+        }
+    }
+    default.to_string()
+}
+
+pub fn codex_user_agent(default: &str) -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_USER_AGENT") {
+        return raw.clone();
+    }
+    if let Some(raw) = env.get("CCP_USER_AGENT") {
+        return raw.clone();
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir) {
+        if let Some(codex) = file.codex {
+            if let Some(ua) = codex.user_agent {
+                return ua;
+            }
+        }
+    }
+    default.to_string()
+}
+
+pub fn codex_previous_response_id() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_PREVIOUS_RESPONSE_ID") {
+        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir) {
+        if let Some(codex) = file.codex {
+            if let Some(val) = codex.previous_response_id {
+                return val;
+            }
+        }
+    }
+    false
+}
+
+pub fn codex_service_tier() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_SERVICE_TIER") {
+        return Some(raw.clone());
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir) {
+        if let Some(codex) = file.codex {
+            return codex.service_tier;
+        }
+    }
+    None
+}
+
+pub fn codex_effort() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_EFFORT") {
+        return Some(raw.clone());
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir) {
+        if let Some(codex) = file.codex {
+            return codex.effort;
+        }
+    }
+    None
+}
+
+pub fn codex_model() -> Option<String> {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_MODEL") {
+        return Some(raw.clone());
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir) {
+        if let Some(codex) = file.codex {
+            return codex.model;
+        }
+    }
+    None
 }

@@ -128,7 +128,7 @@ async fn missing_model_returns_400() {
 }
 
 #[tokio::test]
-async fn known_model_reaches_placeholder_provider() {
+async fn known_model_reaches_codex_provider() {
     let app = app(Arc::new(Registry::with_default_alias()));
     let response = app
         .oneshot(
@@ -144,15 +144,11 @@ async fn known_model_reaches_placeholder_provider() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    let body: Value = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap();
-    assert_eq!(
-        body["error"]["type"].as_str().unwrap_or(""),
-        "unsupported_provider_error"
+    // Codex provider is now concrete, so it should attempt auth before returning 501
+    let status = response.status();
+    assert!(
+        status != StatusCode::NOT_IMPLEMENTED,
+        "codex should no longer be a placeholder provider"
     );
 }
 
@@ -173,7 +169,12 @@ async fn count_tokens_routes_to_provider() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    // Codex provider is now concrete, so count_tokens should succeed
+    let status = response.status();
+    assert!(
+        status != StatusCode::NOT_IMPLEMENTED,
+        "count_tokens should no longer return 501 for codex models"
+    );
 }
 
 #[tokio::test]

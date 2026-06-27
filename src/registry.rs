@@ -32,7 +32,7 @@ const CURSOR_LEGACY_MODELS: &[&str] = &[
     "composer-2.5-fast",
 ];
 
-const CODEX_MODELS: &[&str] = &[
+pub(crate) const CODEX_MODELS: &[&str] = &[
     "gpt-5.2",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
@@ -62,6 +62,7 @@ impl Registry {
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
             let handler: Arc<dyn Provider> = match name.as_str() {
+                "codex" => Arc::new(crate::providers::codex::CodexProvider::new()),
                 "kimi" => Arc::new(crate::providers::kimi::KimiProvider::new()),
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
             };
