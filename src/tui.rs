@@ -34,6 +34,7 @@ const SELECTED_BG: Color = Color::Rgb(42, 45, 54);
 const GREEN: Color = Color::Rgb(120, 200, 120);
 const RED: Color = Color::Rgb(220, 120, 120);
 const YELLOW: Color = Color::Rgb(220, 200, 100);
+const BLUE: Color = Color::Rgb(120, 170, 230);
 const DIM: Color = Color::Rgb(100, 104, 114);
 
 pub struct MonitorUiConfig<'a> {
@@ -55,11 +56,13 @@ pub fn run_monitor(
         show_help: false,
         detail: false,
         selected: 0,
+        tick: 0,
         shutdown: config.shutdown,
     };
 
     loop {
         let state = handle.snapshot();
+        app.tick = app.tick.wrapping_add(1);
         terminal.draw(|frame| render(frame, &mut app, &state))?;
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
@@ -100,6 +103,7 @@ struct MonitorApp {
     show_help: bool,
     detail: bool,
     selected: usize,
+    tick: usize,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
@@ -146,7 +150,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
         .constraints([
             Constraint::Length(1),
             if app.show_setup {
-                Constraint::Length(8)
+                Constraint::Length(10)
             } else {
                 Constraint::Length(0)
             },
@@ -162,7 +166,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
         frame.render_widget(
             Paragraph::new(app.setup_text.as_str())
                 .style(Style::default().fg(DIM_WHITE).bg(PANEL_BG))
-                .block(panel("Setup"))
+                .block(panel("Setup", false))
                 .wrap(Wrap { trim: false }),
             root[1],
         );
@@ -172,7 +176,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
     } else {
         render_sessions(frame, root[2], &state.sessions, app.selected);
     }
-    render_active(frame, root[3], &state.active);
+    render_active(frame, root[3], &state.active, app.tick);
     render_recent(frame, root[4], &state.recent);
     render_footer(frame, root[5], app);
 
@@ -194,42 +198,56 @@ fn render_header(
     let text = Line::from(vec![
         Span::styled(
             " claude-code-proxy",
-            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(BG)
+                .bg(TEAL)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ", Style::default().fg(DIM)),
+        Span::styled("  ", Style::default().fg(BG).bg(TEAL)),
         Span::styled(
             format!("http://127.0.0.1:{}", app.port),
-            Style::default().fg(DIM_WHITE),
+            Style::default().fg(BG).bg(TEAL),
         ),
-        Span::styled("  uptime ", Style::default().fg(DIM)),
-        Span::styled(format_duration(uptime), Style::default().fg(WHITE)),
-        Span::styled("  sessions ", Style::default().fg(DIM)),
+        Span::styled("  uptime ", Style::default().fg(BG).bg(TEAL)),
+        Span::styled(
+            format_duration(uptime),
+            Style::default()
+                .fg(BG)
+                .bg(TEAL)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  sessions ", Style::default().fg(BG).bg(TEAL)),
         Span::styled(
             state.sessions.len().to_string(),
-            Style::default().fg(if state.sessions.is_empty() {
-                DIM
-            } else {
-                GREEN
-            }),
+            Style::default()
+                .fg(BG)
+                .bg(TEAL)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  active ", Style::default().fg(DIM)),
+        Span::styled("  active ", Style::default().fg(BG).bg(TEAL)),
         Span::styled(
             state.active.len().to_string(),
-            Style::default().fg(if state.active.is_empty() { DIM } else { YELLOW }),
+            Style::default()
+                .fg(BG)
+                .bg(TEAL)
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
-    frame.render_widget(Paragraph::new(text).style(Style::default().bg(BG)), area);
+    frame.render_widget(Paragraph::new(text).style(Style::default().bg(TEAL)), area);
 }
 
-fn panel(title: &'static str) -> Block<'static> {
+fn panel(title: &'static str, focused: bool) -> Block<'static> {
+    let color = if focused { TEAL } else { SEPARATOR };
     Block::default()
         .title(Span::styled(
             format!(" {title} "),
-            Style::default().fg(DIM_WHITE),
+            Style::default()
+                .fg(if focused { TEAL } else { DIM_WHITE })
+                .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(SEPARATOR))
+        .border_style(Style::default().fg(color))
         .style(Style::default().bg(PANEL_BG))
 }
 
@@ -268,9 +286,11 @@ fn status_style(value: &str) -> Style {
 
 fn status_color(value: &str) -> Color {
     match value {
-        "completed" | "streaming" => GREEN,
+        "completed" => GREEN,
+        "streaming" => TEAL,
         "failed" => RED,
-        "upstream" | "selected" | "started" => YELLOW,
+        "upstream" => BLUE,
+        "selected" | "started" => YELLOW,
         _ => DIM_WHITE,
     }
 }
@@ -298,6 +318,17 @@ fn rate_cell(value: String) -> Cell<'static> {
     )
 }
 
+fn left_rate_cell(value: String) -> Cell<'static> {
+    let color = if value.contains("tok/s") {
+        TEAL
+    } else if value == "-" {
+        DIM
+    } else {
+        DIM_WHITE
+    };
+    Cell::from(Span::styled(value, Style::default().fg(color)))
+}
+
 fn provider_cell(value: Option<&str>) -> Cell<'static> {
     let value = value.unwrap_or("-");
     let color = match value {
@@ -310,6 +341,14 @@ fn provider_cell(value: Option<&str>) -> Cell<'static> {
     Cell::from(Span::styled(value.to_string(), Style::default().fg(color)))
 }
 
+fn detail_cell(value: &str) -> Cell<'static> {
+    if value.is_empty() || value == "-" {
+        Cell::from(Span::styled("", Style::default().fg(DIM)))
+    } else {
+        Cell::from(Span::styled(value.to_string(), Style::default().fg(YELLOW)))
+    }
+}
+
 fn compact_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -320,15 +359,13 @@ fn compact_tokens(tokens: u64) -> String {
     }
 }
 
-fn token_pair(input: Option<u64>, output: Option<u64>) -> String {
-    match (input, output) {
-        (Some(input), Some(output)) => {
-            format!("{}/{}", compact_tokens(input), compact_tokens(output))
-        }
-        (Some(input), None) => compact_tokens(input),
-        (None, Some(output)) => compact_tokens(output),
-        (None, None) => "-".to_string(),
-    }
+fn token_value(value: Option<u64>) -> String {
+    value.map(compact_tokens).unwrap_or_else(|| "-".to_string())
+}
+
+fn spinner(tick: usize) -> &'static str {
+    const FRAMES: &[&str] = &["/", "-", "\\", "|"];
+    FRAMES[tick % FRAMES.len()]
 }
 
 fn render_sessions(
@@ -347,11 +384,8 @@ fn render_sessions(
             number_cell(session.failure_count.to_string()),
             provider_cell(session.provider.as_deref()),
             text_cell(session.model.as_deref().unwrap_or("-")),
-            number_cell(format!(
-                "{}/{}",
-                compact_tokens(session.input_tokens),
-                compact_tokens(session.output_tokens)
-            )),
+            number_cell(compact_tokens(session.input_tokens)),
+            number_cell(compact_tokens(session.output_tokens)),
             rate_cell(session.rate().label()),
             status_cell(&session.last_status),
         ])
@@ -371,27 +405,41 @@ fn render_sessions(
             Constraint::Length(5),
             Constraint::Length(10),
             Constraint::Percentage(20),
-            Constraint::Length(13),
+            Constraint::Length(9),
+            Constraint::Length(9),
             Constraint::Length(12),
             Constraint::Length(10),
         ],
     )
     .header(table_header([
-        "", "session", "active", "reqs", "fail", "provider", "model", "tokens", "rate", "status",
+        "", "session", "active", "reqs", "fail", "provider", "model", "in", "out", "rate", "status",
     ]))
-    .block(panel("Sessions"));
+    .block(panel("Sessions", true));
     frame.render_widget(table, area);
 }
 
-fn render_active(frame: &mut ratatui::Frame<'_>, area: Rect, active: &[ActiveRequest]) {
+fn render_active(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    active: &[ActiveRequest],
+    tick: usize,
+) {
     let rows = active.iter().map(|request| {
+        let status = if matches!(
+            request.status.label(),
+            "upstream" | "streaming" | "selected" | "started"
+        ) {
+            format!("{} {}", spinner(tick), request.status.label())
+        } else {
+            request.status.label().to_string()
+        };
         Row::new(vec![
             muted_cell(format_system_time(request.started_at)),
             provider_cell(request.provider.as_deref()),
             text_cell(request.model.as_deref().unwrap_or("-")),
             muted_cell(request.endpoint.label()),
-            status_cell(request.status.label()),
-            rate_cell(request.rate().label()),
+            Cell::from(Span::styled(status, status_style(request.status.label()))),
+            left_rate_cell(request.rate().label()),
             number_cell(format_duration(request.elapsed())),
         ])
         .style(Style::default().bg(PANEL_BG))
@@ -401,9 +449,9 @@ fn render_active(frame: &mut ratatui::Frame<'_>, area: Rect, active: &[ActiveReq
         [
             Constraint::Length(8),
             Constraint::Length(10),
-            Constraint::Percentage(24),
+            Constraint::Min(18),
             Constraint::Length(12),
-            Constraint::Length(10),
+            Constraint::Length(13),
             Constraint::Length(12),
             Constraint::Length(9),
         ],
@@ -411,7 +459,7 @@ fn render_active(frame: &mut ratatui::Frame<'_>, area: Rect, active: &[ActiveReq
     .header(table_header([
         "started", "provider", "model", "endpoint", "status", "rate", "elapsed",
     ]))
-    .block(panel("Active requests"));
+    .block(panel("Active requests", false));
     frame.render_widget(table, area);
 }
 
@@ -430,8 +478,9 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
             text_cell(request.model.as_deref().unwrap_or("-")),
             number_cell(format_duration(request.latency)),
             rate_cell(request.rate().label()),
-            number_cell(token_pair(request.input_tokens, request.output_tokens)),
-            muted_cell(request.error.as_deref().unwrap_or("")),
+            number_cell(token_value(request.input_tokens)),
+            number_cell(token_value(request.output_tokens)),
+            detail_cell(request.error.as_deref().unwrap_or("")),
         ])
         .style(Style::default().bg(PANEL_BG))
     });
@@ -441,17 +490,18 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
             Constraint::Length(8),
             Constraint::Length(6),
             Constraint::Length(10),
-            Constraint::Percentage(20),
+            Constraint::Min(16),
             Constraint::Length(9),
             Constraint::Length(12),
-            Constraint::Length(11),
-            Constraint::Percentage(24),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Percentage(28),
         ],
     )
     .header(table_header([
-        "finished", "status", "provider", "model", "latency", "rate", "tokens", "error",
+        "finished", "status", "provider", "model", "latency", "rate", "in", "out", "details",
     ]))
-    .block(panel("Recent requests"));
+    .block(panel("Recent requests", false));
     frame.render_widget(table, area);
 }
 
@@ -474,7 +524,17 @@ fn render_session_detail(
             detail_line("provider", session.provider.as_deref().unwrap_or("-"), TEAL),
             detail_line("model", session.model.as_deref().unwrap_or("-"), DIM_WHITE),
             detail_line(
-                "tokens",
+                "input tokens",
+                compact_tokens(session.input_tokens),
+                DIM_WHITE,
+            ),
+            detail_line(
+                "output tokens",
+                compact_tokens(session.output_tokens),
+                DIM_WHITE,
+            ),
+            detail_line(
+                "total tokens",
                 format!(
                     "{}/{}",
                     compact_tokens(session.input_tokens),
@@ -498,7 +558,7 @@ fn render_session_detail(
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().bg(PANEL_BG))
-            .block(panel("Session detail")),
+            .block(panel("Session detail", true)),
         area,
     );
 }
@@ -574,15 +634,21 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect) {
 }
 
 pub fn setup_text(port: u16, registry: &Registry) -> String {
+    let grouped = registry.grouped_models();
+    let model_summary = ["codex", "kimi", "cursor"]
+        .into_iter()
+        .filter_map(|provider| {
+            grouped
+                .get(provider)
+                .map(|models| format!("{provider}: {} models", models.len()))
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
     let mut lines = vec![
         format!("Logs: {}", paths::log_file().display()),
         format!("Config: {}", paths::config_dir().display()),
+        format!("Providers: {model_summary}"),
     ];
-    for provider in ["codex", "kimi", "cursor"] {
-        if let Some(models) = registry.grouped_models().get(provider) {
-            lines.push(format!("{provider}: {}", models.join(", ")));
-        }
-    }
     lines.push(format!(
         "export ANTHROPIC_BASE_URL=\"http://localhost:{port}\""
     ));
