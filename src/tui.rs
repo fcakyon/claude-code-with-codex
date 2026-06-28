@@ -370,7 +370,7 @@ fn token_value(value: Option<u64>) -> String {
 }
 
 fn spinner(tick: usize) -> &'static str {
-    const FRAMES: &[&str] = &["/", "-", "\\", "|"];
+    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     FRAMES[tick % FRAMES.len()]
 }
 
