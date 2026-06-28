@@ -98,10 +98,13 @@ claude-code-proxy cursor auth status
 ```sh
 claude-code-proxy serve                # listens on 127.0.0.1:18765
 PORT=11435 claude-code-proxy serve     # change the listen port
+claude-code-proxy serve --no-monitor   # plain logs instead of the monitor TUI
 ```
 
 Binds to `127.0.0.1` only. One `serve` process handles all providers — the
-upstream for each request is chosen from `ANTHROPIC_MODEL`.
+upstream for each request is chosen from `ANTHROPIC_MODEL`. When stdout is a
+terminal, `serve` opens a monitor TUI with sessions, active requests, recent
+requests, and error events. Use `--no-monitor` for plain terminal output.
 
 ### 4. Point Claude Code at it
 
@@ -409,7 +412,7 @@ sequenceDiagram
 
 | Command                                             | Description               |
 | --------------------------------------------------- | ------------------------- |
-| [`serve`](#serve)                                   | Start the proxy on `PORT` |
+| [`serve`](#serve)                                   | Start the proxy and monitor |
 | `codex auth login` / `device` / `status` / `logout` | Codex OAuth management    |
 | `kimi  auth login` / `status` / `logout`            | Kimi OAuth management     |
 | `cursor auth login` / `status` / `logout`           | Cursor OAuth management   |
@@ -418,20 +421,26 @@ sequenceDiagram
 
 ### `serve`
 
-Starts the HTTP proxy and blocks. Binds to `127.0.0.1` only. Logs to the
-platform state directory (rotated at 20 MiB). Set `CCP_LOG_STDERR=1` to mirror
-log lines to stderr while running.
+Starts the HTTP proxy and blocks. Binds to `127.0.0.1` only. When stdout is a
+terminal, `serve` opens a monitor TUI showing sessions, active requests, recent
+requests, token throughput, and error events. Use `--no-monitor` to run with
+plain terminal output.
+
+Logs are written to the platform state directory and rotated at 20 MiB. Set
+`CCP_LOG_STDERR=1` to mirror log lines to stderr while running without the
+monitor.
 
 ```sh
 claude-code-proxy serve
 PORT=11435 claude-code-proxy serve
-CCP_LOG_STDERR=1 claude-code-proxy serve
+claude-code-proxy serve --no-monitor
+CCP_LOG_STDERR=1 claude-code-proxy serve --no-monitor
 ```
 
-Prints the supported model → provider mapping on startup. One `serve` process
-dispatches to any provider based on the `model` field in each request.
-Requests whose model isn't registered with any provider are rejected with
-HTTP 400 listing the supported ids.
+The plain server banner prints the supported model to provider mapping on
+startup. One `serve` process dispatches to any provider based on the `model`
+field in each request. Requests whose model isn't registered with any provider
+are rejected with HTTP 400 listing the supported ids.
 
 ---
 
@@ -678,6 +687,9 @@ sticky sessions or shared state before enabling continuation.
   `%LOCALAPPDATA%\claude-code-proxy\proxy.log` on Windows (falling back to
   `%USERPROFILE%\AppData\Local`). Secrets (`authorization`, `access`,
   `refresh`, `id_token`, `ChatGPT-Account-Id`, …) are redacted before write.
+- `errors/` - failed proxy responses captured as JSON files under the state
+  directory. `request_failed` log lines include an `errorFile` path for copying
+  the complete redacted error payload into debugging notes or an AI prompt.
 - `traffic/` — per-request captures written when `CCP_TRAFFIC_LOG=1` is set.
   Captures live under the state directory, grouped by Claude Code session and
   request sequence. They include inbound Anthropic requests, translated upstream
