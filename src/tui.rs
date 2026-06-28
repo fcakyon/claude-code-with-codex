@@ -137,14 +137,6 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(SEPARATOR))
-        .style(Style::default().bg(BG));
-    let inner = outer.inner(area);
-    frame.render_widget(outer, area);
-
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -159,7 +151,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
             Constraint::Percentage(35),
             Constraint::Length(1),
         ])
-        .split(inner);
+        .split(area);
 
     render_header(frame, root[0], app, state);
     if app.show_setup {
