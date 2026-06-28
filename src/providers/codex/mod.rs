@@ -281,6 +281,42 @@ pub(crate) static CODEX_CLI: CodexCli = CodexCli;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn supported_models_includes_fast_variants() {
@@ -294,6 +330,9 @@ mod tests {
 
     #[test]
     fn codex_cli_status_unauthenticated() {
+        let _lock = env_lock();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
         // Without stored auth, status should fail
         let result = CODEX_CLI.status();
         assert!(result.is_err());
@@ -307,6 +346,9 @@ mod tests {
 
     #[test]
     fn codex_cli_logout_does_not_error() {
+        let _lock = env_lock();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
         // Logout without auth should succeed
         let result = CODEX_CLI.logout();
         assert!(result.is_ok());
