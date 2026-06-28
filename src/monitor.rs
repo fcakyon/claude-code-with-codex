@@ -181,8 +181,41 @@ impl Throughput {
 #[derive(Debug, Clone)]
 pub struct MonitorState {
     pub started_at: SystemTime,
+    pub sessions: Vec<SessionSummary>,
     pub active: Vec<ActiveRequest>,
     pub recent: Vec<CompletedRequest>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub session_id: Option<String>,
+    pub active_count: usize,
+    pub request_count: usize,
+    pub failure_count: usize,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub last_seen: SystemTime,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub elapsed: Duration,
+    pub last_status: String,
+}
+
+impl SessionSummary {
+    pub fn rate(&self) -> Throughput {
+        throughput(
+            Some(self.output_tokens).filter(|tokens| *tokens > 0),
+            0,
+            0,
+            self.elapsed,
+        )
+    }
+
+    pub fn label(&self) -> String {
+        self.session_id
+            .clone()
+            .unwrap_or_else(|| "no-session".to_string())
+    }
 }
 
 #[derive(Debug)]
@@ -227,6 +260,7 @@ impl MonitorHandle {
             Ok(store) => store.snapshot(),
             Err(_) => MonitorState {
                 started_at: SystemTime::now(),
+                sessions: Vec::new(),
                 active: Vec::new(),
                 recent: Vec::new(),
             },
@@ -498,12 +532,89 @@ impl MonitorStore {
     fn snapshot(&self) -> MonitorState {
         let mut active: Vec<_> = self.active.values().cloned().collect();
         active.sort_by_key(|request| request.started_at);
+        let sessions = session_summaries(&active, &self.recent);
         MonitorState {
             started_at: self.started_at,
+            sessions,
             active,
             recent: self.recent.iter().cloned().collect(),
         }
     }
+}
+
+fn session_summaries(
+    active: &[ActiveRequest],
+    recent: &VecDeque<CompletedRequest>,
+) -> Vec<SessionSummary> {
+    let mut sessions: HashMap<Option<String>, SessionSummary> = HashMap::new();
+    for request in recent.iter().rev() {
+        let entry = sessions
+            .entry(request.session_id.clone())
+            .or_insert_with(|| SessionSummary {
+                session_id: request.session_id.clone(),
+                active_count: 0,
+                request_count: 0,
+                failure_count: 0,
+                provider: None,
+                model: None,
+                last_seen: request.finished_at,
+                input_tokens: 0,
+                output_tokens: 0,
+                elapsed: Duration::ZERO,
+                last_status: "-".to_string(),
+            });
+        entry.request_count += 1;
+        if request.status == RequestStatus::Failed {
+            entry.failure_count += 1;
+        }
+        entry.provider = request.provider.clone().or(entry.provider.clone());
+        entry.model = request.model.clone().or(entry.model.clone());
+        entry.last_seen = request.finished_at;
+        entry.input_tokens = entry
+            .input_tokens
+            .saturating_add(request.input_tokens.unwrap_or(0));
+        entry.output_tokens = entry
+            .output_tokens
+            .saturating_add(request.output_tokens.unwrap_or(0));
+        entry.elapsed = entry.elapsed.saturating_add(request.latency);
+        entry.last_status = request.status.label().to_string();
+    }
+
+    for request in active {
+        let entry = sessions
+            .entry(request.session_id.clone())
+            .or_insert_with(|| SessionSummary {
+                session_id: request.session_id.clone(),
+                active_count: 0,
+                request_count: 0,
+                failure_count: 0,
+                provider: None,
+                model: None,
+                last_seen: request.started_at,
+                input_tokens: 0,
+                output_tokens: 0,
+                elapsed: Duration::ZERO,
+                last_status: "-".to_string(),
+            });
+        entry.active_count += 1;
+        entry.request_count += 1;
+        entry.provider = request.provider.clone().or(entry.provider.clone());
+        entry.model = request.model.clone().or(entry.model.clone());
+        entry.last_seen = SystemTime::now();
+        entry.input_tokens = entry
+            .input_tokens
+            .saturating_add(request.input_tokens.unwrap_or(0));
+        entry.output_tokens = entry
+            .output_tokens
+            .saturating_add(request.output_tokens.unwrap_or(0));
+        entry.elapsed = entry.elapsed.saturating_add(request.elapsed());
+        entry.last_status = request.status.label().to_string();
+    }
+
+    let mut out: Vec<_> = sessions.into_values().collect();
+    out.sort_by_key(|session| session.last_seen);
+    out.reverse();
+    out
 }
 
 pub fn throughput(
@@ -526,6 +637,36 @@ pub fn throughput(
         return Throughput::EventsPerSecond(stream_chunks as f64 / secs);
     }
     Throughput::None
+}
+
+pub fn usage_from_anthropic_sse(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
+    let text = String::from_utf8_lossy(bytes);
+    let mut input_tokens = None;
+    let mut output_tokens = None;
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
+            continue;
+        };
+        for usage in [
+            value.pointer("/usage"),
+            value.pointer("/delta/usage"),
+            value.pointer("/message/usage"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(tokens) = usage.get("input_tokens").and_then(|value| value.as_u64()) {
+                input_tokens = Some(tokens);
+            }
+            if let Some(tokens) = usage.get("output_tokens").and_then(|value| value.as_u64()) {
+                output_tokens = Some(tokens);
+            }
+        }
+    }
+    (input_tokens, output_tokens)
 }
 
 #[cfg(test)]
@@ -603,5 +744,43 @@ mod tests {
             throughput(None, 0, 36, elapsed),
             Throughput::EventsPerSecond(18.0)
         );
+    }
+
+    #[test]
+    fn sse_usage_extracts_final_message_delta_tokens() {
+        let sse = br#"event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":12,"output_tokens":48}}
+
+"#;
+        assert_eq!(usage_from_anthropic_sse(sse), (Some(12), Some(48)));
+    }
+
+    #[test]
+    fn session_summaries_group_recent_and_active_requests() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started(
+            "r1",
+            Some("s1".to_string()),
+            Some(1),
+            EndpointKind::Messages,
+        );
+        monitor.provider_selected("r1", "codex", "gpt-5.5");
+        monitor.request_completed("r1", 200, Some(10), Some(20));
+        monitor.request_started(
+            "r2",
+            Some("s1".to_string()),
+            Some(2),
+            EndpointKind::Messages,
+        );
+        monitor.provider_selected("r2", "codex", "gpt-5.5");
+        let state = monitor.snapshot();
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].label(), "s1");
+        assert_eq!(state.sessions[0].request_count, 2);
+        assert_eq!(state.sessions[0].active_count, 1);
+        assert_eq!(state.sessions[0].output_tokens, 20);
     }
 }

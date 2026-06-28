@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
+use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::providers::kimi::auth::token_store::file_store;
 use crate::providers::kimi::translate::accumulate::accumulate_response;
@@ -125,12 +126,13 @@ impl Provider for KimiProvider {
                 }
             };
             if let Some(monitor) = ctx.monitor.as_ref() {
+                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
                 monitor.stream_progress(
                     &ctx.req_id,
                     sse_bytes.len() as u64,
                     count_sse_events(&sse_bytes),
-                    None,
-                    None,
+                    input_tokens,
+                    output_tokens,
                 );
             }
 

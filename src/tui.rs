@@ -19,7 +19,7 @@ use ratatui::{
 use tokio::sync::oneshot;
 
 use crate::{
-    monitor::{ActiveRequest, CompletedRequest, MonitorHandle, MonitorState},
+    monitor::{ActiveRequest, CompletedRequest, MonitorHandle, MonitorState, SessionSummary},
     paths,
     registry::Registry,
 };
@@ -127,8 +127,9 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
             } else {
                 Constraint::Length(0)
             },
-            Constraint::Percentage(38),
-            Constraint::Percentage(38),
+            Constraint::Percentage(40),
+            Constraint::Percentage(25),
+            Constraint::Percentage(35),
             Constraint::Length(if app.show_help { 5 } else { 3 }),
         ])
         .split(frame.area());
@@ -143,12 +144,13 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
         );
     }
     if app.detail {
-        render_detail(frame, root[2], state, app.selected);
+        render_session_detail(frame, root[2], state, app.selected);
     } else {
-        render_active(frame, root[2], &state.active);
+        render_sessions(frame, root[2], &state.sessions, app.selected);
     }
-    render_recent(frame, root[3], &state.recent);
-    render_footer(frame, root[4], app);
+    render_active(frame, root[3], &state.active);
+    render_recent(frame, root[4], &state.recent);
+    render_footer(frame, root[5], app);
 }
 
 fn render_header(
@@ -167,9 +169,10 @@ fn render_header(
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "  http://127.0.0.1:{}  uptime {}  active {}",
+            "  http://127.0.0.1:{}  uptime {}  sessions {}  active {}",
             app.port,
             format_duration(uptime),
+            state.sessions.len(),
             state.active.len()
         )),
     ]);
@@ -177,6 +180,52 @@ fn render_header(
         Paragraph::new(text).block(Block::default().borders(Borders::ALL)),
         area,
     );
+}
+
+fn render_sessions(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    sessions: &[SessionSummary],
+    selected: usize,
+) {
+    let rows = sessions.iter().enumerate().map(|(index, session)| {
+        let marker = if index == selected { ">" } else { " " };
+        Row::new(vec![
+            Cell::from(marker),
+            Cell::from(shorten(&session.label(), 26)),
+            Cell::from(session.active_count.to_string()),
+            Cell::from(session.request_count.to_string()),
+            Cell::from(session.failure_count.to_string()),
+            Cell::from(session.provider.as_deref().unwrap_or("-")),
+            Cell::from(session.model.as_deref().unwrap_or("-")),
+            Cell::from(format!(
+                "{}/{}",
+                session.input_tokens, session.output_tokens
+            )),
+            Cell::from(session.rate().label()),
+            Cell::from(session.last_status.as_str()),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(1),
+            Constraint::Percentage(24),
+            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(10),
+            Constraint::Percentage(20),
+            Constraint::Length(13),
+            Constraint::Length(12),
+            Constraint::Length(10),
+        ],
+    )
+    .header(Row::new([
+        "", "session", "active", "reqs", "fail", "provider", "model", "tokens", "rate", "status",
+    ]))
+    .block(Block::default().title("Sessions").borders(Borders::ALL));
+    frame.render_widget(table, area);
 }
 
 fn render_active(frame: &mut ratatui::Frame<'_>, area: Rect, active: &[ActiveRequest]) {
@@ -233,6 +282,7 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
             Cell::from(request.provider.as_deref().unwrap_or("-")),
             Cell::from(request.model.as_deref().unwrap_or("-")),
             Cell::from(format_duration(request.latency)),
+            Cell::from(request.rate().label()),
             Cell::from(tokens),
             Cell::from(request.error.as_deref().unwrap_or("")),
         ])
@@ -243,14 +293,15 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
             Constraint::Length(8),
             Constraint::Length(6),
             Constraint::Length(10),
-            Constraint::Percentage(24),
+            Constraint::Percentage(20),
             Constraint::Length(9),
+            Constraint::Length(12),
             Constraint::Length(11),
-            Constraint::Percentage(30),
+            Constraint::Percentage(24),
         ],
     )
     .header(Row::new([
-        "finished", "status", "provider", "model", "latency", "tokens", "error",
+        "finished", "status", "provider", "model", "latency", "rate", "tokens", "error",
     ]))
     .block(
         Block::default()
@@ -260,53 +311,40 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
     frame.render_widget(table, area);
 }
 
-fn render_detail(
+fn render_session_detail(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     state: &MonitorState,
     selected: usize,
 ) {
-    let lines = if let Some(request) = state.active.get(selected) {
+    let lines = if let Some(session) = state.sessions.get(selected) {
         vec![
-            Line::from(format!("request: {}", request.request_id)),
-            Line::from(format!(
-                "session: {}",
-                session_label(request.session_id.as_deref(), request.session_seq)
-            )),
+            Line::from(format!("session: {}", session.label())),
+            Line::from(format!("active requests: {}", session.active_count)),
+            Line::from(format!("total requests: {}", session.request_count)),
+            Line::from(format!("failures: {}", session.failure_count)),
             Line::from(format!(
                 "provider: {}",
-                request.provider.as_deref().unwrap_or("-")
+                session.provider.as_deref().unwrap_or("-")
             )),
             Line::from(format!(
                 "model: {}",
-                request.model.as_deref().unwrap_or("-")
-            )),
-            Line::from(format!("status: {}", request.status.label())),
-            Line::from(format!(
-                "stream: {} bytes, {} events",
-                request.streamed_bytes, request.stream_chunks
-            )),
-            Line::from(format!("rate: {}", request.rate().label())),
-            Line::from(format!(
-                "traffic: {}",
-                request
-                    .traffic_capture_path
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "-".to_string())
+                session.model.as_deref().unwrap_or("-")
             )),
             Line::from(format!(
-                "error: {}",
-                request.error.as_deref().unwrap_or("-")
+                "tokens: {}/{}",
+                session.input_tokens, session.output_tokens
             )),
+            Line::from(format!("rate: {}", session.rate().label())),
+            Line::from(format!("last status: {}", session.last_status)),
         ]
     } else {
-        vec![Line::from("No active request selected")]
+        vec![Line::from("No session selected")]
     };
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
-                .title("Request detail")
+                .title("Session detail")
                 .borders(Borders::ALL),
         ),
         area,
@@ -315,9 +353,9 @@ fn render_detail(
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &MonitorApp) {
     let hints = if app.show_help {
-        "q/Ctrl-C quit  ? help  b setup  j/Down next  k/Up previous  Enter detail  Esc back"
+        "q/Ctrl-C quit  ? help  b setup  j/Down next  k/Up previous  Enter session detail  Esc back"
     } else {
-        "q quit  ? help  b setup  Enter detail"
+        "q quit  ? help  b setup  Enter session"
     };
     frame.render_widget(
         Paragraph::new(hints).block(Block::default().borders(Borders::ALL)),
@@ -372,11 +410,11 @@ fn format_system_time(time: SystemTime) -> String {
     )
 }
 
-fn session_label(session_id: Option<&str>, session_seq: Option<u64>) -> String {
-    match (session_id, session_seq) {
-        (Some(id), Some(seq)) => format!("{id} #{seq}"),
-        (Some(id), None) => id.to_string(),
-        (None, Some(seq)) => format!("#{seq}"),
-        (None, None) => "-".to_string(),
+fn shorten(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
     }
+    let mut out: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('~');
+    out
 }

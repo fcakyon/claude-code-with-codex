@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
 use crate::config;
+use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::registry;
 
@@ -148,12 +149,13 @@ impl Provider for CodexProvider {
                 }
             };
             if let Some(monitor) = ctx.monitor.as_ref() {
+                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
                 monitor.stream_progress(
                     &ctx.req_id,
                     sse_bytes.len() as u64,
                     count_sse_events(&sse_bytes),
-                    None,
-                    None,
+                    input_tokens,
+                    output_tokens,
                 );
             }
             update_continuation_from_upstream(
