@@ -93,14 +93,6 @@ fn parse_alias(raw: &str) -> Option<AliasProvider> {
     }
 }
 
-fn parse_bool_raw(raw: &str) -> Option<bool> {
-    match raw.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" => Some(true),
-        "0" | "false" | "no" => Some(false),
-        _ => None,
-    }
-}
-
 fn read_file_config(config_dir: &Path) -> Option<FileConfig> {
     let path = config_dir.join("config.json");
     let raw = fs::read_to_string(path).ok()?;
@@ -140,10 +132,8 @@ pub fn load_config() -> LoadedConfig {
         out.port = port;
     }
 
-    if let Some(raw) = env.get("CCP_LOG_VERBOSE") {
-        if let Some(value) = parse_bool_raw(raw) {
-            out.log_verbose = value;
-        }
+    if env.contains_key("CCP_LOG_VERBOSE") {
+        out.log_verbose = true;
     } else if let Some(value) = file
         .as_ref()
         .and_then(|f| f.log.as_ref().and_then(|v| v.verbose))
@@ -151,10 +141,8 @@ pub fn load_config() -> LoadedConfig {
         out.log_verbose = value;
     }
 
-    if let Some(raw) = env.get("CCP_LOG_STDERR") {
-        if let Some(value) = parse_bool_raw(raw) {
-            out.log_stderr = value;
-        }
+    if env.contains_key("CCP_LOG_STDERR") {
+        out.log_stderr = true;
     } else if let Some(value) = file
         .as_ref()
         .and_then(|f| f.log.as_ref().and_then(|v| v.stderr))
@@ -506,6 +494,35 @@ mod tests {
     fn clear_env() {
         unsafe {
             std::env::remove_var("CCP_CODEX_TRANSPORT");
+            std::env::remove_var("CCP_CONFIG_DIR");
+            std::env::remove_var("CCP_LOG_VERBOSE");
+            std::env::remove_var("CCP_LOG_STDERR");
+        }
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
         }
     }
 
@@ -575,5 +592,36 @@ mod tests {
         assert_eq!(CodexTransport::Http.as_str(), "http");
         assert_eq!(CodexTransport::WebSocket.as_str(), "websocket");
         assert_eq!(CodexTransport::Auto.as_str(), "auto");
+    }
+
+    #[test]
+    fn log_env_presence_enables_legacy_verbose_and_stderr() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+        let _verbose_env = EnvGuard::set("CCP_LOG_VERBOSE", "0");
+        let _stderr_env = EnvGuard::set("CCP_LOG_STDERR", "");
+
+        let loaded = load_config();
+        assert!(loaded.log_verbose);
+        assert!(loaded.log_stderr);
+    }
+
+    #[test]
+    fn log_config_values_apply_without_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"log":{"verbose":true,"stderr":true}}"#,
+        )
+        .unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        let loaded = load_config();
+        assert!(loaded.log_verbose);
+        assert!(loaded.log_stderr);
     }
 }

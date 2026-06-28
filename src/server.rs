@@ -1,5 +1,6 @@
 use crate::{
     anthropic::json_error,
+    logging::{Logger, REDACT_KEYS, create_logger},
     provider::RequestContext,
     registry::{Registry, normalize_incoming_model},
     session::{self, SessionState},
@@ -14,8 +15,9 @@ use axum::{
     routing::{get, post},
 };
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -25,6 +27,20 @@ pub struct ServerConfig {
 
 pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", config.port)).await?;
+    create_logger("server").info(
+        "server listening",
+        Some(serde_json::Map::from_iter([
+            ("port".to_string(), json!(config.port)),
+            (
+                "logDir".to_string(),
+                json!(
+                    crate::paths::log_file()
+                        .parent()
+                        .map(|path| path.display().to_string())
+                ),
+            ),
+        ])),
+    );
     let app = app(Arc::new(Registry::with_default_alias()));
     axum::serve(listener, app).await?;
     Ok(())
@@ -59,33 +75,74 @@ async fn dispatch_request(
     req: Request<Body>,
     count_tokens: bool,
 ) -> Response {
+    let started_at = Instant::now();
+    let log = create_logger("server");
+    let req_id = Uuid::new_v4().to_string();
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let headers = req.headers().clone();
+    let path = uri.path().to_string();
+    let query = redacted_query(&uri);
+    log.info(
+        "request",
+        Some(serde_json::Map::from_iter([
+            ("reqId".to_string(), json!(&req_id)),
+            ("method".to_string(), json!(method.as_str())),
+            ("path".to_string(), json!(&path)),
+            ("query".to_string(), json!(&query)),
+        ])),
+    );
     let session_id = req
         .headers()
         .get("x-claude-code-session-id")
         .and_then(|value| value.to_str().ok())
         .map(std::string::ToString::to_string);
-    let req_id = Uuid::new_v4().to_string();
     let now = current_millis();
     let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Ok(bytes) => bytes,
         Err(err) => {
-            return json_error(
+            let response = json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 format!("Invalid JSON: {err}"),
             );
+            log_request_completed(
+                &log,
+                RequestLogContext {
+                    req_id: &req_id,
+                    provider: None,
+                    model: None,
+                    count_tokens,
+                    status: response.status(),
+                    started_at,
+                },
+            );
+            return response;
         }
     };
 
     let body: crate::anthropic::schema::MessagesRequest = match parse_json_body(&body_bytes) {
         Ok(body) => body,
-        Err(response) => return *response,
+        Err(response) => {
+            log_request_completed(
+                &log,
+                RequestLogContext {
+                    req_id: &req_id,
+                    provider: None,
+                    model: None,
+                    count_tokens,
+                    status: response.status(),
+                    started_at,
+                },
+            );
+            return *response;
+        }
     };
 
     let model = match body.model.as_deref() {
         Some(model) => model,
         None => {
-            return json_error(
+            let response = json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 format!(
@@ -93,6 +150,18 @@ async fn dispatch_request(
                     registry.unknown_model_message()
                 ),
             );
+            log_request_completed(
+                &log,
+                RequestLogContext {
+                    req_id: &req_id,
+                    provider: None,
+                    model: None,
+                    count_tokens,
+                    status: response.status(),
+                    started_at,
+                },
+            );
+            return response;
         }
     };
 
@@ -113,7 +182,14 @@ async fn dispatch_request(
     let provider = match provider {
         Some(provider) => provider,
         None => {
-            return json_error(
+            log.warn(
+                "unknown model",
+                Some(serde_json::Map::from_iter([
+                    ("reqId".to_string(), json!(&req_id)),
+                    ("model".to_string(), json!(&normalized_model)),
+                ])),
+            );
+            let response = json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 format!(
@@ -121,6 +197,18 @@ async fn dispatch_request(
                     registry.unknown_model_message()
                 ),
             );
+            log_request_completed(
+                &log,
+                RequestLogContext {
+                    req_id: &req_id,
+                    provider: None,
+                    model: Some(&normalized_model),
+                    count_tokens,
+                    status: response.status(),
+                    started_at,
+                },
+            );
+            return response;
         }
     };
 
@@ -145,11 +233,16 @@ async fn dispatch_request(
         capture.write_json(
             "000-metadata",
             &json!({
-                "reqId": req_id,
-                "sessionId": session_id,
+                "reqId": &req_id,
+                "sessionId": &session_id,
                 "sessionSeq": current.as_ref().map(|s| s.seq),
+                "kind": if count_tokens { "count_tokens" } else { "messages" },
                 "provider": provider.name(),
-                "model": normalized_model,
+                "model": &normalized_model,
+                "method": method.as_str(),
+                "path": &path,
+                "query": &query,
+                "headers": headers_to_record(&headers),
             }),
         );
         capture.write_json(
@@ -159,18 +252,84 @@ async fn dispatch_request(
     }
 
     let context = RequestContext {
-        req_id,
+        req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|s| s.seq),
         provider: provider.name().to_string(),
         traffic,
     };
 
-    if count_tokens {
+    let response = if count_tokens {
         provider.handle_count_tokens(body, context).await
     } else {
         provider.handle_messages(body, context).await
+    };
+    log_request_completed(
+        &log,
+        RequestLogContext {
+            req_id: &req_id,
+            provider: Some(provider.name()),
+            model: Some(&normalized_model),
+            count_tokens,
+            status: response.status(),
+            started_at,
+        },
+    );
+    response
+}
+
+struct RequestLogContext<'a> {
+    req_id: &'a str,
+    provider: Option<&'a str>,
+    model: Option<&'a str>,
+    count_tokens: bool,
+    status: StatusCode,
+    started_at: Instant,
+}
+
+fn log_request_completed(log: &Logger, ctx: RequestLogContext<'_>) {
+    log.info(
+        "request_completed",
+        Some(serde_json::Map::from_iter([
+            ("reqId".to_string(), json!(ctx.req_id)),
+            ("provider".to_string(), json!(ctx.provider)),
+            ("model".to_string(), json!(ctx.model)),
+            ("countTokens".to_string(), json!(ctx.count_tokens)),
+            ("status".to_string(), json!(ctx.status.as_u16())),
+            (
+                "ms".to_string(),
+                json!(ctx.started_at.elapsed().as_millis()),
+            ),
+        ])),
+    );
+}
+
+fn headers_to_record(headers: &http::HeaderMap) -> Value {
+    let mut out = Map::new();
+    for (key, value) in headers {
+        if let Ok(raw) = value.to_str() {
+            out.insert(key.as_str().to_string(), Value::String(raw.to_string()));
+        }
     }
+    Value::Object(out)
+}
+
+fn redacted_query(uri: &http::Uri) -> Value {
+    let mut out = Map::new();
+    let Some(query) = uri.query() else {
+        return Value::Object(out);
+    };
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        let key = key.into_owned();
+        let lower = key.to_lowercase();
+        let value = if REDACT_KEYS.contains(&lower.as_str()) {
+            Value::String(format!("[redacted len={}]", value.len()))
+        } else {
+            Value::String(value.into_owned())
+        };
+        out.insert(key, value);
+    }
+    Value::Object(out)
 }
 
 fn parse_json_body<T>(body: &[u8]) -> Result<T, Box<Response>>

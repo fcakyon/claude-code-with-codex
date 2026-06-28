@@ -630,9 +630,9 @@ Windows, and at
 | `PORT`                           | `port`                     | `18765`                                           | Proxy listen port                                                                                                                |
 | `CCP_CONFIG_DIR`                 | unset                      | platform config dir                               | Per-process config directory; Cursor auth uses it for file storage                                                               |
 | `XDG_STATE_HOME`                 | —                          | `~/.local/state`                                  | Linux/macOS base dir for `proxy.log`                                                                                             |
-| `CCP_LOG_STDERR`                 | `log.stderr`               | unset                                             | Also mirror log lines to stderr                                                                                                  |
-| `CCP_LOG_VERBOSE`                | `log.verbose`              | unset                                             | Log full request/response bodies + every SSE event                                                                               |
-| `CCP_TRAFFIC_LOG`                | —                          | unset                                             | Write per-request traffic captures under `traffic/` for session debugging                                                        |
+| `CCP_LOG_STDERR`                 | `log.stderr`               | unset                                             | Also mirror log lines to stderr; any env value enables it                                                                        |
+| `CCP_LOG_VERBOSE`                | `log.verbose`              | unset                                             | Preserve full string fields in `proxy.log`; any env value enables it                                                             |
+| `CCP_TRAFFIC_LOG`                | —                          | unset                                             | Write full per-request traffic captures under `traffic/` for session debugging (`1`, `true`, or `yes`)                           |
 | `CCP_ALIAS_PROVIDER`             | `aliasProvider`            | `codex`                                           | Route Anthropic-style aliases (`haiku`, `sonnet`, `opus`, `claude-*`) through `codex` or `kimi`                                  |
 | `CCP_KIMI_OAUTH_HOST`            | `kimi.oauthHost`           | `https://auth.kimi.com`                           | Override Kimi's OAuth host (debugging only)                                                                                      |
 | `CCP_KIMI_BASE_URL`              | `kimi.baseUrl`             | `https://api.kimi.com/coding/v1`                  | Override Kimi's API base URL                                                                                                     |
@@ -686,6 +686,8 @@ sticky sessions or shared state before enabling continuation.
   sequence numbers so sorted filenames preserve emission order. Token and
   account headers are redacted, but prompt and tool content are intentionally
   preserved for debugging.
+  For the most complete debugging run, use `CCP_LOG_STDERR=1 CCP_LOG_VERBOSE=1
+  CCP_TRAFFIC_LOG=1`.
 - `config.json` — optional configuration file (see table above). It lives at
   `~/.config/claude-code-proxy/config.json` on macOS,
   `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` on Linux,

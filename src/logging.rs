@@ -162,8 +162,8 @@ fn redact_with_depth(value: Value, depth: u8) -> Value {
         Value::String(s) => {
             if config::log_verbose() {
                 Value::String(s)
-            } else if s.len() > 1000 {
-                Value::String(format!("{}…[{} more]", &s[..1000], s.len() - 1000))
+            } else if s.len() > 4000 {
+                Value::String(format!("{}…[{} more]", &s[..4000], s.len() - 4000))
             } else {
                 Value::String(s)
             }

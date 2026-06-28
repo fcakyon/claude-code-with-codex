@@ -71,7 +71,12 @@ impl TrafficCapture {
     }
 
     pub fn write_text(&self, name: &str, text: &str) {
-        let path = self.next_artifact_path(name, false);
+        let file = if name.ends_with(".txt") {
+            name.to_string()
+        } else {
+            format!("{name}.txt")
+        };
+        let path = self.next_artifact_path(&file, false);
         let _ = write_bytes(path, text.as_bytes());
     }
 

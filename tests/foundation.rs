@@ -111,7 +111,7 @@ fn logging_redaction_and_truncation() {
     let long = "a".repeat(5000);
     let long_payload = redact_value(json!({"text": long}));
     let text = long_payload["text"].as_str().unwrap();
-    assert!(text.contains("[4000 more]"));
+    assert!(text.contains("[1000 more]"));
 }
 
 #[test]
