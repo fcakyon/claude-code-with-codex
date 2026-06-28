@@ -241,6 +241,9 @@ where
     K: Keychain,
 {
     fn load(&self) -> Result<Option<T>> {
+        if let Some(parsed) = self.file_store.load()? {
+            return Ok(Some(parsed));
+        }
         if self.use_keychain
             && let Some(raw) = self.keychain.read(&self.service, &self.account)?
         {
@@ -248,7 +251,7 @@ where
                 .map(Some)
                 .map_err(|err| anyhow::anyhow!("Failed to parse Keychain auth JSON: {err}"));
         }
-        self.file_store.load()
+        Ok(None)
     }
 
     fn save(&self, value: T) -> Result<()> {
@@ -506,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn keychain_file_store_loads_keychain_before_file() {
+    fn keychain_file_store_loads_file_before_keychain() {
         let temp = tempfile::TempDir::new().unwrap();
         let file = temp_auth_path(&temp, "auth.json");
         let legacy = temp_auth_path(&temp, "legacy.json");
@@ -519,22 +522,23 @@ mod tests {
             KeychainFileAuthStore::new(file, legacy, "svc", "acct", true, keychain);
 
         let loaded = store.load().unwrap().unwrap();
-        assert_eq!(loaded["source"], json!("keychain"));
+        assert_eq!(loaded["source"], json!("file"));
         assert_eq!(store.path(), "macOS Keychain");
     }
 
     #[test]
-    fn keychain_file_store_falls_back_to_file_when_keychain_missing() {
+    fn keychain_file_store_falls_back_to_keychain_when_file_missing() {
         let temp = tempfile::TempDir::new().unwrap();
         let file = temp_auth_path(&temp, "auth.json");
         let legacy = temp_auth_path(&temp, "legacy.json");
-        write_atomically(&file, &json!({"source": "file"})).unwrap();
+        let keychain = MockKeychain::default();
+        keychain.set_raw("svc", "acct", json!({"source": "keychain"}));
 
         let store: KeychainFileAuthStore<serde_json::Value, _> =
-            KeychainFileAuthStore::new(file, legacy, "svc", "acct", true, MockKeychain::default());
+            KeychainFileAuthStore::new(file, legacy, "svc", "acct", true, keychain);
 
         let loaded = store.load().unwrap().unwrap();
-        assert_eq!(loaded["source"], json!("file"));
+        assert_eq!(loaded["source"], json!("keychain"));
     }
 
     #[test]
