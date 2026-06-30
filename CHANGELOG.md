@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.2 (2026-06-30)
 
 - Codex WebSocket continuations recover from streams that only deliver rate
   limit or control events, preventing Claude Code sessions from waiting
