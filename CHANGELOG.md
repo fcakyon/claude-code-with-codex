@@ -1,13 +1,15 @@
 # Changelog
 
-## Unreleased
+## v0.1.1 (2026-06-30)
 
-- Codex reasoning summaries are requested with `reasoning.summary: "auto"` when
-  reasoning effort is enabled and are rendered as Anthropic `thinking` blocks
-  when Codex emits summary events.
-- `codex.reasoningSummary` and `CCP_CODEX_REASONING_SUMMARY` control Codex
-  reasoning summaries; `off` and `none` suppress summary display while keeping
-  reasoning effort and encrypted continuation content.
+- Codex reasoning summaries are now surfaced as thinking blocks in the response
+  stream, so you can see the model's reasoning in your Claude Code session
+  when reasoning effort is enabled. Set `codex.reasoningSummary` or
+  `CCP_CODEX_REASONING_SUMMARY` to `off` or `none` to suppress summary display
+  while keeping reasoning effort active. (Thanks @samot-gc!)
+- Codex transport errors (WebSocket connection failures, etc.) now show the
+  actual error message instead of a generic "Upstream error", making
+  connection issues easier to diagnose.
 
 ## v0.1.0 (2026-06-30)
 

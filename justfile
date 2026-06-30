@@ -60,4 +60,4 @@ _release bump *ARGS:
 
 # Release a new patch version
 release *ARGS:
-    @just _release patch {{ARGS}}
+    @just _release patch --skip-publish {{ARGS}}
