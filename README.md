@@ -98,10 +98,13 @@ claude-code-proxy cursor auth status
 ```sh
 claude-code-proxy serve                # listens on 127.0.0.1:18765
 PORT=11435 claude-code-proxy serve     # change the listen port
+claude-code-proxy serve --no-monitor   # plain logs instead of the monitor TUI
 ```
 
 Binds to `127.0.0.1` only. One `serve` process handles all providers — the
-upstream for each request is chosen from `ANTHROPIC_MODEL`.
+upstream for each request is chosen from `ANTHROPIC_MODEL`. When stdout is a
+terminal, `serve` opens a monitor TUI with sessions, active requests, recent
+requests, and error events. Use `--no-monitor` for plain terminal output.
 
 ### 4. Point Claude Code at it
 
@@ -409,7 +412,7 @@ sequenceDiagram
 
 | Command                                             | Description               |
 | --------------------------------------------------- | ------------------------- |
-| [`serve`](#serve)                                   | Start the proxy on `PORT` |
+| [`serve`](#serve)                                   | Start the proxy and monitor |
 | `codex auth login` / `device` / `status` / `logout` | Codex OAuth management    |
 | `kimi  auth login` / `status` / `logout`            | Kimi OAuth management     |
 | `cursor auth login` / `status` / `logout`           | Cursor OAuth management   |
@@ -418,20 +421,26 @@ sequenceDiagram
 
 ### `serve`
 
-Starts the HTTP proxy and blocks. Binds to `127.0.0.1` only. Logs to the
-platform state directory (rotated at 20 MiB). Set `CCP_LOG_STDERR=1` to mirror
-log lines to stderr while running.
+Starts the HTTP proxy and blocks. Binds to `127.0.0.1` only. When stdout is a
+terminal, `serve` opens a monitor TUI showing sessions, active requests, recent
+requests, token throughput, and error events. Use `--no-monitor` to run with
+plain terminal output.
+
+Logs are written to the platform state directory and rotated at 20 MiB. Set
+`CCP_LOG_STDERR=1` to mirror log lines to stderr while running without the
+monitor.
 
 ```sh
 claude-code-proxy serve
 PORT=11435 claude-code-proxy serve
-CCP_LOG_STDERR=1 claude-code-proxy serve
+claude-code-proxy serve --no-monitor
+CCP_LOG_STDERR=1 claude-code-proxy serve --no-monitor
 ```
 
-Prints the supported model → provider mapping on startup. One `serve` process
-dispatches to any provider based on the `model` field in each request.
-Requests whose model isn't registered with any provider are rejected with
-HTTP 400 listing the supported ids.
+The plain server banner prints the supported model to provider mapping on
+startup. One `serve` process dispatches to any provider based on the `model`
+field in each request. Requests whose model isn't registered with any provider
+are rejected with HTTP 400 listing the supported ids.
 
 ---
 
@@ -630,9 +639,9 @@ Windows, and at
 | `PORT`                           | `port`                     | `18765`                                           | Proxy listen port                                                                                                                |
 | `CCP_CONFIG_DIR`                 | unset                      | platform config dir                               | Per-process config directory; Cursor auth uses it for file storage                                                               |
 | `XDG_STATE_HOME`                 | —                          | `~/.local/state`                                  | Linux/macOS base dir for `proxy.log`                                                                                             |
-| `CCP_LOG_STDERR`                 | `log.stderr`               | unset                                             | Also mirror log lines to stderr                                                                                                  |
-| `CCP_LOG_VERBOSE`                | `log.verbose`              | unset                                             | Log full request/response bodies + every SSE event                                                                               |
-| `CCP_TRAFFIC_LOG`                | —                          | unset                                             | Write per-request traffic captures under `traffic/` for session debugging                                                        |
+| `CCP_LOG_STDERR`                 | `log.stderr`               | unset                                             | Also mirror log lines to stderr; any env value enables it                                                                        |
+| `CCP_LOG_VERBOSE`                | `log.verbose`              | unset                                             | Preserve full string fields in `proxy.log`; any env value enables it                                                             |
+| `CCP_TRAFFIC_LOG`                | —                          | unset                                             | Write full per-request traffic captures under `traffic/` for session debugging (`1`, `true`, or `yes`)                           |
 | `CCP_ALIAS_PROVIDER`             | `aliasProvider`            | `codex`                                           | Route Anthropic-style aliases (`haiku`, `sonnet`, `opus`, `claude-*`) through `codex` or `kimi`                                  |
 | `CCP_KIMI_OAUTH_HOST`            | `kimi.oauthHost`           | `https://auth.kimi.com`                           | Override Kimi's OAuth host (debugging only)                                                                                      |
 | `CCP_KIMI_BASE_URL`              | `kimi.baseUrl`             | `https://api.kimi.com/coding/v1`                  | Override Kimi's API base URL                                                                                                     |
@@ -678,6 +687,9 @@ sticky sessions or shared state before enabling continuation.
   `%LOCALAPPDATA%\claude-code-proxy\proxy.log` on Windows (falling back to
   `%USERPROFILE%\AppData\Local`). Secrets (`authorization`, `access`,
   `refresh`, `id_token`, `ChatGPT-Account-Id`, …) are redacted before write.
+- `errors/` - failed proxy responses captured as JSON files under the state
+  directory. `request_failed` log lines include an `errorFile` path for copying
+  the complete redacted error payload into debugging notes or an AI prompt.
 - `traffic/` — per-request captures written when `CCP_TRAFFIC_LOG=1` is set.
   Captures live under the state directory, grouped by Claude Code session and
   request sequence. They include inbound Anthropic requests, translated upstream
@@ -686,6 +698,8 @@ sticky sessions or shared state before enabling continuation.
   sequence numbers so sorted filenames preserve emission order. Token and
   account headers are redacted, but prompt and tool content are intentionally
   preserved for debugging.
+  For the most complete debugging run, use `CCP_LOG_STDERR=1 CCP_LOG_VERBOSE=1
+  CCP_TRAFFIC_LOG=1`.
 - `config.json` — optional configuration file (see table above). It lives at
   `~/.config/claude-code-proxy/config.json` on macOS,
   `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` on Linux,
@@ -747,17 +761,24 @@ sticky sessions or shared state before enabling continuation.
 ## Development
 
 ```sh
-bunx tsc --noEmit                          # typecheck
-bun src/cli.ts serve                       # run locally (routes all providers)
-tail -f ~/.local/state/claude-code-proxy/proxy.log | jq .
+cargo run -- serve                         # run locally (routes all providers)
+cargo test --all                           # run tests
+cargo fmt --all --check                    # check formatting
+cargo clippy --all-targets -- -D warnings  # lint
+just check                                 # run the full project check
 ```
+
+### Smoke coverage
+
+See [docs/smoke-cutover.md](docs/smoke-cutover.md) for automated smoke tests,
+optional real-auth validation steps, known transport differences, and the
+current Rust support scope.
 
 **Install a compiled dev build globally:** compile the current working tree to a
 binary and place it on your `PATH` without linking:
 
 ```sh
-mkdir -p ~/.local/bin
-bun build ./src/cli.ts --compile --outfile ~/.local/bin/claude-code-proxy
+cargo install --path . --locked
 ```
 
 ## Related projects

@@ -11,62 +11,96 @@ env:
   BIN_NAME: claude-code-proxy
 
 jobs:
-  build:
+  checks:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --locked
+
+  build:
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: bun-darwin-arm64
+          - os: macos-14
+            target: aarch64-apple-darwin
             platform: darwin-arm64
             ext: ""
             archive: tar.gz
-          - target: bun-darwin-x64
+          - os: macos-13
+            target: x86_64-apple-darwin
             platform: darwin-amd64
             ext: ""
             archive: tar.gz
-          - target: bun-linux-x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
             platform: linux-amd64
             ext: ""
             archive: tar.gz
-          - target: bun-linux-arm64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
             platform: linux-arm64
             ext: ""
             archive: tar.gz
-          - target: bun-windows-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
             platform: windows-amd64
             ext: .exe
             archive: zip
-          - target: bun-windows-arm64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
             platform: windows-arm64
             ext: .exe
             archive: zip
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          bun-version: latest
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+          targets: ${{ matrix.target }}
       - name: Build
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+      - name: Verify Unix binary
+        if: runner.os != 'Windows'
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          mkdir -p dist
-          bun build ./src/cli.ts \
-            --compile \
-            --target=${{ matrix.target }} \
-            --define BUILD_VERSION="\"${VERSION#v}\"" \
-            --outfile dist/${BIN_NAME}${{ matrix.ext }}
-      - name: Package
+          expected="claude-code-proxy ${VERSION#v}"
+          actual="$(target/${{ matrix.target }}/release/${BIN_NAME} --version)"
+          test "$actual" = "$expected"
+      - name: Verify Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
+          $expected = "claude-code-proxy $($env:VERSION.TrimStart('v'))"
+          $actual = & "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" --version
+          if ($actual -ne $expected) {
+            Write-Error "expected '$expected', got '$actual'"
+          }
+      - name: Package Unix
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${BIN_NAME}"
           archive="${BIN_NAME}-${{ matrix.platform }}.${{ matrix.archive }}"
-          if [[ "${{ matrix.archive }}" == "zip" ]]; then
-            (cd dist && zip "../$archive" ${BIN_NAME}${{ matrix.ext }})
-          else
-            tar -C dist -czf "$archive" ${BIN_NAME}${{ matrix.ext }}
-          fi
+          tar -C dist -czf "$archive" "${BIN_NAME}"
           shasum -a 256 "$archive" > "${BIN_NAME}-${{ matrix.platform }}.sha256"
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" "dist/${env:BIN_NAME}.exe"
+          $archive = "${env:BIN_NAME}-${{ matrix.platform }}.${{ matrix.archive }}"
+          Compress-Archive -Path "dist/${env:BIN_NAME}.exe" -DestinationPath $archive -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
+          "$hash  $archive" | Out-File -FilePath "${env:BIN_NAME}-${{ matrix.platform }}.sha256" -Encoding ascii
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.platform }}

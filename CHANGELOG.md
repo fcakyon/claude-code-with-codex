@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+## v0.1.0 (2026-06-30)
+
+- Ships the native Rust implementation as the release binary and removes the
+  copied TypeScript reference source from the branch.
+- Adds the default monitor TUI for `serve`, with session, active request,
+  recent request, and events panels.
+- Records failed proxy responses under the state directory `errors/` folder and
+  links them from `request_failed` log events for copyable diagnostics.
+- Adds stable session ordering, visible token throughput, and clearer request
+  error details in the monitor.
+- Resolves Codex model aliases before building upstream requests, so
+  Claude-style aliases such as `claude-sonnet-4-6` are sent as supported Codex
+  model names.
+- Add end-to-end smoke coverage for Kimi chat-completions, Codex HTTP
+  Responses, and Codex WebSocket Responses through in-process mock upstreams
+  with isolated auth.
+- Document the smoke procedure, known transport differences, traffic-capture
+  shape, and current Rust support scope in `docs/smoke-cutover.md`.
+
 ## v0.0.22 (2026-06-24)
 
 - Codex requests now retry more transient stream and overload failures, making temporary upstream errors less likely to interrupt Claude Code sessions. ([#15](https://github.com/raine/claude-code-proxy/issues/15))
