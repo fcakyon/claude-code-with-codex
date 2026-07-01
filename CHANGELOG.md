@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.3 (2026-07-01)
 
 - Codex WebSocket streams deliver live text and reasoning progress while reusing
   pooled session continuations to reduce repeated upstream input.
