@@ -1,9 +1,21 @@
 # Changelog
 
+## v0.1.7 (2026-07-06)
+
+- Codex `Read` tool calls get clearer offset guidance and recover from clearly
+  invalid large offsets, reducing stalled sessions caused by mistaken
+  line-number reads.
+- The monitor keeps request lists accurate when a client disconnects or abandons
+  a request.
+
 ## v0.1.5 (2026-07-03)
 
-- Claude Code's `xhigh` and `max` effort settings now work with Codex and Kimi requests instead of being rejected or downgraded unexpectedly. ([#20](https://github.com/raine/claude-code-proxy/pull/20))
-- Codex receives clearer `Read` tool guidance for line offsets, reducing incorrect follow-up reads on large files. ([#22](https://github.com/raine/claude-code-proxy/pull/22))
+- Claude Code's `xhigh` and `max` effort settings now work with Codex and Kimi
+  requests instead of being rejected or downgraded unexpectedly.
+  ([#20](https://github.com/raine/claude-code-proxy/pull/20))
+- Codex receives clearer `Read` tool guidance for line offsets, reducing
+  incorrect follow-up reads on large files.
+  ([#22](https://github.com/raine/claude-code-proxy/pull/22))
 
 ## v0.1.4 (2026-07-01)
 
