@@ -58,6 +58,10 @@ pub enum MonitorEvent {
         provider: String,
         model: String,
     },
+    ModelResolved {
+        request_id: String,
+        model: String,
+    },
     UpstreamStarted {
         request_id: String,
     },
@@ -299,6 +303,13 @@ impl MonitorHandle {
         });
     }
 
+    pub fn model_resolved(&self, request_id: impl Into<String>, model: impl Into<String>) {
+        self.publish(MonitorEvent::ModelResolved {
+            request_id: request_id.into(),
+            model: model.into(),
+        });
+    }
+
     pub fn upstream_started(&self, request_id: impl Into<String>) {
         self.publish(MonitorEvent::UpstreamStarted {
             request_id: request_id.into(),
@@ -417,6 +428,15 @@ impl MonitorStore {
                     active.provider = Some(provider);
                     active.model = Some(model);
                     active.status = RequestStatus::ProviderSelected;
+                }
+            }
+            MonitorEvent::ModelResolved { request_id, model } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.model = Some(match active.model.take() {
+                        Some(incoming) if incoming != model => format!("{incoming} -> {model}"),
+                        Some(incoming) => incoming,
+                        None => model,
+                    });
                 }
             }
             MonitorEvent::UpstreamStarted { request_id } => {
@@ -749,6 +769,31 @@ mod tests {
         assert_eq!(state.active[0].request_id, "r1");
         assert_eq!(state.active[0].session_id.as_deref(), Some("s1"));
         assert_eq!(state.active[0].session_seq, Some(3));
+    }
+
+    #[test]
+    fn resolved_model_appends_to_incoming_alias() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("r1", None, None, EndpointKind::Messages);
+        monitor.provider_selected("r1", "codex", "claude-sonnet-4-6");
+        monitor.model_resolved("r1", "gpt-5.4");
+
+        let state = monitor.snapshot();
+        assert_eq!(
+            state.active[0].model.as_deref(),
+            Some("claude-sonnet-4-6 -> gpt-5.4")
+        );
+    }
+
+    #[test]
+    fn identical_resolved_model_is_shown_once() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started("r1", None, None, EndpointKind::Messages);
+        monitor.provider_selected("r1", "codex", "gpt-5.6-sol");
+        monitor.model_resolved("r1", "gpt-5.6-sol");
+
+        let state = monitor.snapshot();
+        assert_eq!(state.active[0].model.as_deref(), Some("gpt-5.6-sol"));
     }
 
     #[test]

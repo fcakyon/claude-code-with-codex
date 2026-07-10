@@ -71,6 +71,9 @@ impl Provider for KimiProvider {
                 ),
             );
         }
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.model_resolved(&ctx.req_id, &resolved);
+        }
 
         let translated = match translate_request(
             &body,
@@ -165,6 +168,11 @@ impl Provider for KimiProvider {
     }
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
+        let model = body.model.as_deref().unwrap_or("kimi-for-coding");
+        let resolved = resolve_model(model);
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.model_resolved(&ctx.req_id, &resolved);
+        }
         let tokens = count_tokens::count_tokens(&body);
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.usage_updated(&ctx.req_id, Some(tokens), None);

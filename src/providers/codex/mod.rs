@@ -99,6 +99,9 @@ impl Provider for CodexProvider {
                 ),
             );
         }
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.model_resolved(&ctx.req_id, &resolved.model);
+        }
 
         let translated = match translate_request(
             &body,
@@ -242,6 +245,9 @@ impl Provider for CodexProvider {
                     e.model
                 ),
             );
+        }
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.model_resolved(&ctx.req_id, &resolved.model);
         }
 
         let translated = match translate_request(
