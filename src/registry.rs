@@ -15,8 +15,12 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
     "claude-haiku-4-5-20251001",
     "sonnet",
     "claude-sonnet-4-6",
+    "claude-sonnet-5",
     "opus",
     "claude-opus-4-7",
+    "claude-opus-4-8",
+    "fable",
+    "claude-fable-5",
 ];
 
 pub const CURSOR_PREFIXES: &[&str] = &["cursor:", "cursor-plan:", "cursor-ask:"];
@@ -313,6 +317,24 @@ mod tests {
         let p = registry.provider_for_model("haiku", None);
         assert!(p.is_some());
         assert_eq!(p.expect("provider").name(), "kimi");
+    }
+
+    #[test]
+    fn opus_4_8_routes_to_configured_provider() {
+        let registry = Registry::new(AliasProvider::Codex);
+        let p = registry.provider_for_model("claude-opus-4-8", None);
+        assert!(p.is_some());
+        assert_eq!(p.expect("provider").name(), "codex");
+    }
+
+    #[test]
+    fn claude_5_aliases_route_to_configured_provider() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for model in ["claude-sonnet-5", "fable", "claude-fable-5"] {
+            let p = registry.provider_for_model(model, None);
+            assert!(p.is_some(), "{model} should route to a provider");
+            assert_eq!(p.expect("provider").name(), "codex");
+        }
     }
 
     #[test]
