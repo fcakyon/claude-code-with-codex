@@ -234,13 +234,6 @@ fn resolve_effort(effort: Option<Effort>) -> Result<Option<Effort>, anyhow::Erro
     Ok(effort)
 }
 
-fn cap_luna_effort(effort: Option<Effort>) -> Option<Effort> {
-    match effort {
-        Some(Effort::High | Effort::Xhigh) => Some(Effort::Medium),
-        other => other,
-    }
-}
-
 fn reasoning_summary_requested(summary: Option<&str>) -> bool {
     !matches!(summary, Some("off" | "none"))
 }
@@ -299,7 +292,6 @@ pub fn translate_request(
     let input = build_input(req);
     let tools = read_tools(req)?;
     let tool_choice = map_tool_choice(req)?;
-    let is_luna = opts.model == "gpt-5.6-luna";
 
     let mut text = ResponsesText {
         verbosity: Some("low".to_string()),
@@ -377,10 +369,7 @@ pub fn translate_request(
 
     let effort = read_effort(req)?;
     let codex_effort = to_codex_effort(effort);
-    let mut resolved_effort = resolve_effort(codex_effort)?;
-    if is_luna {
-        resolved_effort = cap_luna_effort(resolved_effort);
-    }
+    let resolved_effort = resolve_effort(codex_effort)?;
     if let Some(ref eff) = resolved_effort {
         let summary = if reasoning_summary_requested(config::codex_reasoning_summary().as_deref()) {
             Some("auto".to_string())
@@ -1275,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn luna_caps_high_effort_to_medium() {
+    fn luna_preserves_high_effort() {
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.6-luna",
             "messages": [{"role":"user", "content":"hello"}],
@@ -1291,10 +1280,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(matches!(
-            out.reasoning.unwrap().effort,
-            Some(Effort::Medium)
-        ));
+        assert!(matches!(out.reasoning.unwrap().effort, Some(Effort::High)));
     }
 
     #[test]

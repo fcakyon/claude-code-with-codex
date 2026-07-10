@@ -6,7 +6,7 @@ use crate::provider::RequestContext;
 use crate::retry::{compute_backoff_delay, sleep};
 use crate::traffic::TrafficCapture;
 
-use super::auth::constants::{CODEX_API_ENDPOINT, ORIGINATOR};
+use super::auth::constants::{CODEX_API_ENDPOINT, ORIGINATOR, RESPONSES_LITE_ORIGINATOR};
 use super::auth::manager::CodexAuthManager;
 use super::auth::token_store::{DefaultCodexAuthStore, StoredAuth, file_store};
 use super::translate::request::ResponsesRequest;
@@ -98,7 +98,11 @@ pub fn build_codex_headers(
         http::header::AUTHORIZATION,
         header_value("authorization", &bearer)?,
     );
-    let originator = config::codex_originator(ORIGINATOR);
+    let originator = if use_responses_lite {
+        RESPONSES_LITE_ORIGINATOR.to_string()
+    } else {
+        config::codex_originator(ORIGINATOR)
+    };
     headers.insert("originator", header_value("originator", &originator)?);
     headers.insert(
         "openai-beta",
@@ -941,6 +945,7 @@ mod tests {
                 .unwrap(),
             "true"
         );
+        assert_eq!(headers.get("originator").unwrap(), "codex_cli_rs");
     }
 
     #[test]
