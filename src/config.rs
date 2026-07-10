@@ -38,6 +38,7 @@ struct FileConfig {
     pub kimi: Option<KimiConfig>,
     pub codex: Option<CodexConfig>,
     pub cursor: Option<CursorConfig>,
+    pub grok: Option<GrokConfig>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -79,6 +80,14 @@ struct KimiConfig {
     pub oauth_host: Option<String>,
     #[serde(rename = "baseUrl")]
     pub base_url: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GrokConfig {
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
+    #[serde(rename = "clientVersion")]
+    pub client_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -206,6 +215,12 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     if env.contains_key("CCP_KIMI_USER_AGENT") {
         out.push("kimi.userAgent (env)".to_string());
     }
+    if env.contains_key("CCP_GROK_BASE_URL") {
+        out.push("grok.baseUrl (env)".to_string());
+    }
+    if env.contains_key("CCP_GROK_CLIENT_VERSION") {
+        out.push("grok.clientVersion (env)".to_string());
+    }
     if env
         .get("CCP_CODEX_REASONING_SUMMARY")
         .is_some_and(|raw| !raw.is_empty())
@@ -235,6 +250,32 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
         }
     }
     out
+}
+
+pub fn grok_base_url() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_GROK_BASE_URL") {
+        return raw.clone();
+    }
+    if let Some(grok) = read_file_config(&paths::config_dir()).and_then(|f| f.grok)
+        && let Some(url) = grok.base_url
+    {
+        return url;
+    }
+    "https://cli-chat-proxy.grok.com/v1".to_string()
+}
+
+pub fn grok_client_version() -> String {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_GROK_CLIENT_VERSION") {
+        return raw.clone();
+    }
+    if let Some(grok) = read_file_config(&paths::config_dir()).and_then(|f| f.grok)
+        && let Some(version) = grok.client_version
+    {
+        return version;
+    }
+    "0.2.93".to_string()
 }
 
 pub fn is_verbose() -> bool {

@@ -49,6 +49,7 @@ pub(crate) const CODEX_MODELS: &[&str] = &[
 ];
 
 pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "k2.6"];
+pub(crate) const GROK_MODELS: &[&str] = &["grok-composer-2.5-fast", "grok-4.5"];
 
 pub struct Registry {
     alias_provider: AliasProvider,
@@ -65,6 +66,13 @@ impl Registry {
             KIMI_MODELS.iter().map(|m| (*m).to_string()).collect(),
         );
         models.insert("cursor".into(), build_cursor_models());
+        models.insert(
+            "grok".into(),
+            GROK_MODELS
+                .iter()
+                .map(|model| (*model).to_string())
+                .collect(),
+        );
 
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
@@ -72,6 +80,7 @@ impl Registry {
                 "codex" => Arc::new(crate::providers::codex::CodexProvider::new()),
                 "kimi" => Arc::new(crate::providers::kimi::KimiProvider::new()),
                 "cursor" => Arc::new(crate::providers::cursor::CursorProvider::new()),
+                "grok" => Arc::new(crate::providers::grok::GrokProvider::new()),
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
             };
             handlers.insert(name.clone(), handler);
@@ -196,6 +205,7 @@ impl PlaceholderProvider {
             "codex" => "codex",
             "kimi" => "kimi",
             "cursor" => "cursor",
+            "grok" => "grok",
             _ => "codex",
         };
         Self { name, models }
@@ -217,6 +227,7 @@ impl Provider for PlaceholderProvider {
             "codex" => &CODEX_CLI,
             "kimi" => &KIMI_CLI,
             "cursor" => &CURSOR_CLI,
+            "grok" => &GROK_CLI,
             _ => &CODEX_CLI,
         }
     }
@@ -275,6 +286,7 @@ impl CliHandlers for PlaceholderCli {
 const CODEX_CLI: PlaceholderCli = PlaceholderCli { provider: "codex" };
 const KIMI_CLI: PlaceholderCli = PlaceholderCli { provider: "kimi" };
 const CURSOR_CLI: PlaceholderCli = PlaceholderCli { provider: "cursor" };
+const GROK_CLI: PlaceholderCli = PlaceholderCli { provider: "grok" };
 
 fn expand_codex_models() -> Vec<String> {
     let mut set = HashSet::new();

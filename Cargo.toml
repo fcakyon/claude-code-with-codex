@@ -25,8 +25,7 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-time = { version = "0.3", features = ["formatting"] }
-jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "blocking", "http2"] }
 base64 = "0.22"
 rand = "0.8"
@@ -40,6 +39,7 @@ prost = "0.13"
 flate2 = "1.0"
 ratatui = "0.29"
 crossterm = "0.28"
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 
 [dev-dependencies]
 tempfile = "3.14"

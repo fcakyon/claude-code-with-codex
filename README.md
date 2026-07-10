@@ -2,8 +2,8 @@
 
 `claude-code-proxy` lets you use
 [Claude Code](https://www.anthropic.com/claude-code) with your **ChatGPT
-Plus/Pro** subscription, your **Kimi Code** (kimi.com) account, or **Cursor
-Agent**.
+Plus/Pro** subscription, your **Kimi Code** (kimi.com) account, your **Grok**
+subscription, or **Cursor Agent**.
 
 <img src="meta/claude-code-screenshot.webp" alt="Claude Code running through claude-code-proxy" width="630" />
 
@@ -46,7 +46,7 @@ artifacts are published as `claude-code-proxy-windows-amd64.zip` and
 
 ### 2. Pick a provider and authenticate
 
-The proxy supports three upstream providers. Pick one and run its login flow; the
+The proxy supports four upstream providers. Pick one and run its login flow; the
 proxy will refuse to start traffic until a token is stored.
 
 **Codex (ChatGPT Plus/Pro):**
@@ -67,6 +67,15 @@ claude-code-proxy kimi auth login      # device-code flow (prints URL + code)
 
 Sign in with your **kimi.com account**. The verification URL is displayed; open
 it in any browser, confirm the code, and the CLI polls until done.
+
+**Grok (grok.com):**
+
+```sh
+claude-code-proxy grok auth login      # browser OAuth (PKCE)
+```
+
+Sign in with your **grok.com account**. The proxy stores and refreshes its own
+OAuth session and does not use the official Grok CLI credential file.
 
 **Cursor Agent:**
 
@@ -90,6 +99,7 @@ Verify:
 ```sh
 claude-code-proxy codex auth status
 claude-code-proxy kimi auth status
+claude-code-proxy grok auth status
 claude-code-proxy cursor auth status
 ```
 
@@ -112,6 +122,7 @@ requests, and error events. Use `--no-monitor` for plain terminal output.
 
 - `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`, `gpt-5.2` → **codex**
 - `kimi-for-coding`, `kimi-k2.6`, `k2.6` → **kimi**
+- `grok-composer-2.5-fast`, `grok-4.5` → **grok**
 - `cursor`, `cursor-plan`, `cursor-ask`, `composer-2.5`, `composer-2.5-fast`, `cursor:<model-id>`, `cursor-plan:<model-id>`, `cursor-ask:<model-id>` → **cursor**
 
 An unknown model returns a 400 listing the supported ids. There is no
@@ -142,6 +153,15 @@ ANTHROPIC_SMALL_FAST_MODEL=kimi-for-coding[1m] \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
 CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
   claude
+
+# Grok
+ANTHROPIC_BASE_URL=http://localhost:18765 \
+ANTHROPIC_AUTH_TOKEN=unused \
+ANTHROPIC_MODEL=grok-composer-2.5-fast \
+ANTHROPIC_SMALL_FAST_MODEL=grok-composer-2.5-fast \
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
+  claude --model grok-composer-2.5-fast
 
 # Cursor Agent
 ANTHROPIC_BASE_URL=http://localhost:18765 \
@@ -329,6 +349,25 @@ Auth:
 | `kimi auth login`  | Device-code OAuth via `auth.kimi.com` |
 | `kimi auth status` | Show user ID + token expiry           |
 | `kimi auth logout` | Delete stored credentials             |
+
+### Grok
+
+Upstream: `https://cli-chat-proxy.grok.com/v1/responses` (Responses API).
+
+Supported model ids are `grok-composer-2.5-fast` and `grok-4.5`. Model access
+can vary by account and region. The proxy translates Claude Code messages,
+function tools, tool results, thinking, token counts, and streaming events.
+Grok reasoning text appears in Claude Code as Anthropic `thinking` blocks.
+
+Authentication uses browser OAuth with S256 PKCE through `auth.x.ai` and an
+ephemeral loopback callback. The proxy stores its own access and refresh tokens,
+refreshes them five minutes before expiry, and does not use `~/.grok/auth.json`.
+
+| Command            | What it does                        |
+| ------------------ | ----------------------------------- |
+| `grok auth login`  | Browser OAuth with a local callback |
+| `grok auth status` | Show token expiry and storage path  |
+| `grok auth logout` | Delete proxy-owned credentials      |
 
 ### Cursor Agent
 
@@ -629,6 +668,10 @@ Windows, and at
     "oauthHost": "https://auth.kimi.com",
     "baseUrl": "https://api.kimi.com/coding/v1"
   },
+  "grok": {
+    "baseUrl": "https://cli-chat-proxy.grok.com/v1",
+    "clientVersion": "0.2.93"
+  },
   "cursor": {
     "baseUrl": "https://api2.cursor.sh",
     "clientVersion": "cli-2026.06.04-5fd875e",
@@ -662,6 +705,8 @@ Windows, and at
 | `CCP_CODEX_ORIGINATOR`           | `codex.originator`         | `claude-code-proxy`                               | Override the `originator` header sent to Codex                                                                                                                                    |
 | `CCP_CODEX_USER_AGENT`           | `codex.userAgent`          | `claude-code-proxy/<version>`                     | Override the `User-Agent` header sent to Codex                                                                                                                                    |
 | `CCP_KIMI_USER_AGENT`            | `kimi.userAgent`           | `KimiCLI/1.37.0`                                  | Override the `User-Agent` header sent to Kimi                                                                                                                                     |
+| `CCP_GROK_BASE_URL`              | `grok.baseUrl`             | `https://cli-chat-proxy.grok.com/v1`              | Override the Grok Responses API base URL                                                                                                                                          |
+| `CCP_GROK_CLIENT_VERSION`        | `grok.clientVersion`       | `0.2.93`                                          | Override the Grok client version header                                                                                                                                           |
 | `CCP_CURSOR_BASE_URL`            | `cursor.baseUrl`           | `https://api2.cursor.sh`                          | Override Cursor's API base URL                                                                                                                                                    |
 | `CCP_CURSOR_CLIENT_VERSION`      | `cursor.clientVersion`     | `cli-2026.06.04-5fd875e`                          | Override Cursor client version headers                                                                                                                                            |
 | `CCP_CURSOR_AGENT_BUNDLE`        | `cursor.agentBundle`       | auto-detected                                     | Path to Cursor Agent's bundled `index.js` used only for protobuf schemas                                                                                                          |

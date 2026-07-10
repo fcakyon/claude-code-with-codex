@@ -335,11 +335,27 @@ pub fn write_atomically<T: Serialize>(path: &str, value: &T) -> Result<()> {
     fs::create_dir_all(dir)?;
     set_mode(dir, 0o700);
 
-    let tmp = format!("{path}.tmp-{}", std::process::id());
-    let mut out = File::create(&tmp)?;
+    let tmp = format!("{path}.tmp-{}", uuid::Uuid::new_v4());
+    #[cfg(unix)]
+    let mut out = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?
+    };
+    #[cfg(not(unix))]
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
     out.write_all(to_string_pretty(value)?.as_bytes())?;
     out.sync_all()?;
-    fs::rename(&tmp, path)?;
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
     set_mode(std::path::Path::new(path), 0o600);
     Ok(())
 }
