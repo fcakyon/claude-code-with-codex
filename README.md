@@ -358,6 +358,9 @@ Supported model ids are `grok-composer-2.5-fast` and `grok-4.5`. Model access
 can vary by account and region. The proxy translates Claude Code messages,
 function tools, tool results, thinking, token counts, and streaming events.
 Grok reasoning text appears in Claude Code as Anthropic `thinking` blocks.
+Claude Code's `WebSearch` uses Grok's hosted general web search. Requests to
+search X use Grok's hosted `x_search` tool, with citations and search usage
+reported in Claude Code.
 
 Authentication uses browser OAuth with S256 PKCE through `auth.x.ai` and an
 ephemeral loopback callback. The proxy stores its own access and refresh tokens,

@@ -152,7 +152,7 @@ impl StreamTranslator {
                     ReducerEvent::ThinkingStart(_)
                         | ReducerEvent::TextStart(_)
                         | ReducerEvent::ToolStart(_, _, _)
-                        | ReducerEvent::WebSearch { .. }
+                        | ReducerEvent::HostedSearch { .. }
                         | ReducerEvent::Finish { .. }
                 )
             {
@@ -241,16 +241,18 @@ fn render(out: &mut Vec<u8>, event: ReducerEvent) {
             "content_block_delta",
             serde_json::json!({"type":"content_block_delta","index":i,"delta":{"type":"input_json_delta","partial_json":t}}),
         ),
-        ReducerEvent::WebSearch {
+        ReducerEvent::HostedSearch {
             index,
             result_index,
             id,
+            name,
             query,
         } => {
+            let result_type = format!("{name}_tool_result");
             emit(
                 out,
                 "content_block_start",
-                serde_json::json!({"type":"content_block_start","index":index,"content_block":{"type":"server_tool_use","id":id,"name":"web_search","input":{}}}),
+                serde_json::json!({"type":"content_block_start","index":index,"content_block":{"type":"server_tool_use","id":id,"name":name,"input":{}}}),
             );
             emit(
                 out,
@@ -265,7 +267,7 @@ fn render(out: &mut Vec<u8>, event: ReducerEvent) {
             emit(
                 out,
                 "content_block_start",
-                serde_json::json!({"type":"content_block_start","index":result_index,"content_block":{"type":"web_search_tool_result","tool_use_id":id,"content":[]}}),
+                serde_json::json!({"type":"content_block_start","index":result_index,"content_block":{"type":result_type,"tool_use_id":id,"content":[]}}),
             );
             emit(
                 out,
@@ -290,12 +292,14 @@ fn render(out: &mut Vec<u8>, event: ReducerEvent) {
             stop_reason,
             output_tokens,
             web_search_requests,
+            x_search_requests,
             ..
         } => {
+            let hosted_search_requests = web_search_requests + x_search_requests;
             emit(
                 out,
                 "message_delta",
-                serde_json::json!({"type":"message_delta","delta":{"stop_reason":stop_reason,"stop_sequence":null},"usage":{"output_tokens":output_tokens,"server_tool_use":{"web_search_requests":web_search_requests}}}),
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":stop_reason,"stop_sequence":null},"usage":{"output_tokens":output_tokens,"server_tool_use":{"web_search_requests":hosted_search_requests,"x_search_requests":x_search_requests}}}),
             );
             emit(
                 out,
@@ -355,6 +359,19 @@ mod tests {
         assert!(output.contains("citations_delta"));
         assert!(output.contains("https://example.com"));
         assert!(output.contains("\"web_search_requests\":1"));
+    }
+
+    #[test]
+    fn stream_translates_hosted_x_search_usage_and_citations() {
+        let input = b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"x_search\",\"id\":\"xs_1\"}}\n\ndata: {\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"xs_1\",\"delta\":\"{\\\"query\\\":\\\"claude-code-proxy\\\"}\"}\n\ndata: {\"type\":\"response.custom_tool_call_input.done\",\"item_id\":\"xs_1\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"x_search\",\"id\":\"xs_1\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Recent post\"}\n\ndata: {\"type\":\"response.output_text.annotation.added\",\"annotation\":{\"type\":\"url_citation\",\"url\":\"https://x.com/example/status/1\",\"title\":\"Example post\"}}\n\ndata: {\"type\":\"response.output_text.done\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":3}}}\n\n";
+        let output =
+            String::from_utf8(translate_stream_bytes(input, "msg_1", "grok-4.5").unwrap()).unwrap();
+        assert!(output.contains("\"name\":\"x_search\""));
+        assert!(output.contains("x_search_tool_result"));
+        assert!(output.contains("https://x.com/example/status/1"));
+        assert!(output.contains("\"web_search_requests\":1"));
+        assert!(output.contains("\"x_search_requests\":1"));
+        assert!(!output.contains("\"name\":\"Bash\""));
     }
 
     #[test]
