@@ -1,9 +1,6 @@
 # claude-code-proxy
 
-`claude-code-proxy` lets you use
-[Claude Code](https://www.anthropic.com/claude-code) with your **ChatGPT
-Plus/Pro** subscription, your **Kimi Code** (kimi.com) account, your **Grok**
-subscription, or **Cursor Agent**.
+Claude Code, powered by **OpenAI**, **Kimi**, **Grok**, or **Cursor**.
 
 <img src="meta/claude-code-screenshot-2026-07.webp" alt="Claude Code running through claude-code-proxy" />
 
