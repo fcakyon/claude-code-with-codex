@@ -46,7 +46,9 @@ use self::translate::stream::translate_stream_bytes_with_traffic;
 // Provider
 // ---------------------------------------------------------------------------
 
-pub struct CodexProvider;
+pub struct CodexProvider {
+    client: Arc<CodexHttpClient>,
+}
 
 impl Default for CodexProvider {
     fn default() -> Self {
@@ -56,7 +58,9 @@ impl Default for CodexProvider {
 
 impl CodexProvider {
     pub fn new() -> Self {
-        Self
+        Self {
+            client: Arc::new(CodexHttpClient::new()),
+        }
     }
 }
 
@@ -132,7 +136,7 @@ impl Provider for CodexProvider {
         );
 
         // Post to upstream with continuation
-        let client = Arc::new(CodexHttpClient::new());
+        let client = self.client.clone();
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.upstream_started(&ctx.req_id);
         }

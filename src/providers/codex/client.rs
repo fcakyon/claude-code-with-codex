@@ -281,7 +281,7 @@ impl CodexHttpClient {
         use super::continuation::clear_continuation;
         use crate::config::CodexTransport;
 
-        let mut auth = self.auth_manager.get_auth().map_err(|e| CodexError {
+        let mut auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
             status: 401,
             message: "Auth error".to_string(),
             detail: Some(e.to_string()),
@@ -297,6 +297,7 @@ impl CodexHttpClient {
             super::websocket::invalidate_codex_websocket_pool_key(key);
         }
 
+        let mut auth_refresh_attempted = false;
         for transport_attempt in 0..=3u32 {
             let result = match transport {
                 CodexTransport::Http => {
@@ -377,10 +378,14 @@ impl CodexHttpClient {
                 }
             };
 
-            if should_refresh_after_unauthorized(&result, transport_attempt) {
-                match self.auth_manager.force_refresh() {
+            if should_refresh_after_unauthorized(&result, auth_refresh_attempted) {
+                auth_refresh_attempted = true;
+                match self.auth_manager.force_refresh(&auth.access).await {
                     Ok(new_auth) => {
                         auth = new_auth;
+                        if let Some(key) = pool_key {
+                            super::websocket::invalidate_codex_websocket_pool_key(key);
+                        }
                         continue;
                     }
                     Err(e) => {
@@ -513,7 +518,7 @@ impl CodexHttpClient {
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationCandidate>,
     ) -> Result<super::websocket::CodexWebSocketEventReceiver, CodexError> {
-        let auth = self.auth_manager.get_auth().map_err(|e| CodexError {
+        let auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
             status: 401,
             message: "Auth error".to_string(),
             detail: Some(e.to_string()),
@@ -868,9 +873,9 @@ fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
 
 fn should_refresh_after_unauthorized(
     result: &Result<CodexResponse, CodexError>,
-    transport_attempt: u32,
+    auth_refresh_attempted: bool,
 ) -> bool {
-    if transport_attempt != 0 {
+    if auth_refresh_attempted {
         return false;
     }
     match result {
@@ -1367,13 +1372,13 @@ mod tests {
             origin: CodexErrorOrigin::WebSocket,
         });
 
-        assert!(should_refresh_after_unauthorized(&http_unauthorized, 0));
+        assert!(should_refresh_after_unauthorized(&http_unauthorized, false));
         assert!(should_refresh_after_unauthorized(
             &websocket_unauthorized,
-            0
+            false
         ));
-        assert!(!should_refresh_after_unauthorized(&forbidden, 0));
-        assert!(!should_refresh_after_unauthorized(&http_unauthorized, 1));
+        assert!(!should_refresh_after_unauthorized(&forbidden, false));
+        assert!(!should_refresh_after_unauthorized(&http_unauthorized, true));
     }
 
     #[test]
