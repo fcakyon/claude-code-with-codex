@@ -2,6 +2,7 @@ pub mod auth;
 pub mod client;
 pub mod continuation;
 pub mod count_tokens;
+pub(crate) mod events;
 pub mod request_summary;
 pub mod translate;
 pub mod websocket;
@@ -691,114 +692,27 @@ fn drop_live_continuation_for_retry(
     true
 }
 
-fn retryable_live_start_payload(payload: &serde_json::Value, message: &str) -> bool {
-    if payload.get("type").and_then(|v| v.as_str()) == Some("codex.rate_limits")
-        && payload
-            .get("rate_limits")
-            .and_then(|r| r.get("limit_reached"))
-            .and_then(|v| v.as_bool())
-            == Some(true)
-    {
-        return true;
-    }
+fn retryable_live_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "overloaded",
+        "rate limit",
+        "you can retry your request",
+        "temporarily unavailable",
+        "timed out",
+        "connection closed",
+        "connection reset",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
 
-    let status = payload
-        .get("status")
-        .or_else(|| payload.get("status_code"))
-        .and_then(|v| v.as_u64())
-        .or_else(|| {
-            payload
-                .get("error")
-                .and_then(|e| e.get("status"))
-                .and_then(|v| v.as_u64())
-        })
-        .or_else(|| {
-            payload
-                .get("response")
-                .and_then(|r| r.get("error"))
-                .and_then(|e| e.get("status"))
-                .and_then(|v| v.as_u64())
-        });
-    if matches!(status, Some(429 | 500 | 502 | 503 | 504 | 529)) {
-        return true;
-    }
-
-    let code = payload
-        .get("error")
-        .and_then(|e| e.get("code"))
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            payload
-                .get("response")
-                .and_then(|r| r.get("error"))
-                .and_then(|e| e.get("code"))
-                .and_then(|v| v.as_str())
-        });
-    let err_type = payload
-        .get("error")
-        .and_then(|e| e.get("type"))
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            payload
-                .get("response")
-                .and_then(|r| r.get("error"))
-                .and_then(|e| e.get("type"))
-                .and_then(|v| v.as_str())
-        });
-    code == Some("overloaded_error")
-        || err_type == Some("overloaded_error")
-        || retryable_live_message(message)
+fn retryable_live_start_payload(payload: &serde_json::Value, _message: &str) -> bool {
+    events::classify_event_failure(payload).is_some_and(|failure| failure.retryable())
 }
 
 fn retry_after_from_live_payload(payload: &serde_json::Value) -> Option<String> {
-    payload
-        .get("rate_limits")
-        .and_then(|r| r.get("primary"))
-        .and_then(|r| r.get("reset_after_seconds"))
-        .map(json_scalar_to_string)
-        .or_else(|| {
-            payload
-                .get("error")
-                .and_then(|e| e.get("retry_after"))
-                .map(json_scalar_to_string)
-        })
-        .or_else(|| {
-            payload
-                .get("error")
-                .and_then(|e| e.get("retry_after_seconds"))
-                .map(json_scalar_to_string)
-        })
-        .or_else(|| {
-            payload
-                .get("response")
-                .and_then(|r| r.get("error"))
-                .and_then(|e| e.get("retry_after_seconds"))
-                .map(json_scalar_to_string)
-        })
-        .or_else(|| {
-            payload
-                .get("headers")
-                .and_then(|h| h.get("retry-after"))
-                .map(json_scalar_to_string)
-        })
-}
-
-fn json_scalar_to_string(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| value.to_string())
-}
-
-fn retryable_live_message(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    lower.contains("overloaded")
-        || lower.contains("rate limit")
-        || lower.contains("you can retry your request")
-        || lower.contains("temporarily unavailable")
-        || lower.contains("timed out")
-        || lower.contains("connection closed")
-        || lower.contains("connection reset")
+    events::classify_event_failure(payload).and_then(|failure| failure.retry_after)
 }
 
 fn codex_stream_error_type(err: &client::CodexError) -> &'static str {
@@ -853,6 +767,22 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
             );
             let headers = [(http::header::RETRY_AFTER, retry_after)];
             (headers, resp).into_response()
+        }
+        status @ (500 | 502 | 503 | 504 | 529) => {
+            let response = json_error(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                if status == 529 {
+                    "overloaded_error"
+                } else {
+                    "api_error"
+                },
+                codex_error_message(err),
+            );
+            if let Some(retry_after) = err.retry_after.as_deref() {
+                ([(http::header::RETRY_AFTER, retry_after)], response).into_response()
+            } else {
+                response
+            }
         }
         _ => json_error(
             StatusCode::BAD_GATEWAY,

@@ -233,31 +233,7 @@ fn is_previous_response_missing(payload: &serde_json::Value) -> bool {
 }
 
 pub(super) fn event_error_status(payload: &serde_json::Value) -> Option<u16> {
-    if !matches!(
-        payload.get("type").and_then(|value| value.as_str()),
-        Some("error" | "response.error" | "response.failed")
-    ) {
-        return None;
-    }
-
-    payload
-        .get("status")
-        .and_then(|value| value.as_u64())
-        .or_else(|| payload.get("status_code").and_then(|value| value.as_u64()))
-        .or_else(|| {
-            payload
-                .get("error")
-                .and_then(|error| error.get("status"))
-                .and_then(|value| value.as_u64())
-        })
-        .or_else(|| {
-            payload
-                .get("response")
-                .and_then(|response| response.get("error"))
-                .and_then(|error| error.get("status"))
-                .and_then(|value| value.as_u64())
-        })
-        .and_then(|status| u16::try_from(status).ok())
+    super::events::classify_event_failure(payload).and_then(|failure| failure.explicit_status)
 }
 
 #[allow(dead_code)]
