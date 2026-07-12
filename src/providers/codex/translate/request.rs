@@ -52,8 +52,18 @@ pub enum ResponsesToolChoice {
     Auto,
     None,
     Required,
-    Function { r#type: String, name: String },
-    WebSearch { r#type: String },
+    Function {
+        r#type: String,
+        name: String,
+    },
+    WebSearch {
+        r#type: String,
+    },
+    AllowedTools {
+        r#type: String,
+        mode: String,
+        tools: Vec<Value>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,7 +393,10 @@ pub fn translate_request(
 
     // Never force a web_search tool_choice the request didn't register —
     // upstream 502s instead of ignoring it.
-    if matches!(out.tool_choice, Some(ResponsesToolChoice::WebSearch { .. })) {
+    if matches!(
+        out.tool_choice,
+        Some(ResponsesToolChoice::WebSearch { .. } | ResponsesToolChoice::AllowedTools { .. })
+    ) {
         let has_web_search = out.tools.as_ref().is_some_and(|t| {
             t.iter()
                 .any(|tool| matches!(tool, ResponsesTool::WebSearch(_)))
@@ -493,7 +506,7 @@ fn read_tools(req: &MessagesRequest) -> Result<Option<Vec<ResponsesTool>>, anyho
                 filters.allowed_domains.is_some() || filters.blocked_domains.is_some();
             out.push(ResponsesTool::WebSearch(ResponsesWebSearchTool {
                 kind: "web_search".to_string(),
-                external_web_access: false,
+                external_web_access: true,
                 search_content_types: vec!["text".to_string(), "image".to_string()],
                 filters: if has_filters { Some(filters) } else { None },
             }));
@@ -603,8 +616,10 @@ fn map_tool_choice(req: &MessagesRequest) -> Result<Option<ResponsesToolChoice>,
                 })
             });
             if is_web_search {
-                Ok(Some(ResponsesToolChoice::WebSearch {
-                    r#type: "web_search".to_string(),
+                Ok(Some(ResponsesToolChoice::AllowedTools {
+                    r#type: "allowed_tools".to_string(),
+                    mode: "required".to_string(),
+                    tools: vec![serde_json::json!({"type": "web_search"})],
                 }))
             } else {
                 Ok(Some(ResponsesToolChoice::Function {
@@ -907,8 +922,109 @@ mod tests {
         assert_eq!(out.prompt_cache_key.as_deref(), Some("s"));
         assert!(matches!(
             out.tool_choice,
-            Some(ResponsesToolChoice::WebSearch { .. })
+            Some(ResponsesToolChoice::AllowedTools { .. })
         ));
+        let tool_choice = serde_json::to_value(out.tool_choice.as_ref().unwrap()).unwrap();
+        assert_eq!(tool_choice["type"], "allowed_tools");
+        assert_eq!(tool_choice["mode"], "required");
+        assert_eq!(tool_choice["tools"], json!([{"type":"web_search"}]));
+        let ResponsesTool::WebSearch(tool) = &out.tools.as_ref().unwrap()[0] else {
+            panic!("expected web_search tool");
+        };
+        assert!(tool.external_web_access);
+        assert_eq!(
+            tool.filters.as_ref().unwrap().allowed_domains.as_deref(),
+            Some(&["example.com".to_string()][..])
+        );
+        assert!(out.instructions.is_none());
+    }
+
+    #[test]
+    fn automatic_filtered_web_search_keeps_native_filters() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content":"find it"}],
+            "tools": [{
+                "type":"web_search_20250305",
+                "name":"web_search",
+                "allowed_domains":["example.com"],
+                "blocked_domains":["spam.example"]
+            }],
+            "tool_choice": {"type":"auto"}
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        let ResponsesTool::WebSearch(tool) = &out.tools.as_ref().unwrap()[0] else {
+            panic!("expected web_search tool");
+        };
+        assert!(tool.external_web_access);
+        let filters = tool.filters.as_ref().unwrap();
+        assert_eq!(
+            filters.allowed_domains.as_deref(),
+            Some(&["example.com".to_string()][..])
+        );
+        assert_eq!(
+            filters.blocked_domains.as_deref(),
+            Some(&["spam.example".to_string()][..])
+        );
+        assert!(out.instructions.is_none());
+    }
+
+    #[test]
+    fn forced_filtered_web_search_keeps_native_filters() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content":"find it"}],
+            "system": "Be brief.",
+            "tools": [{
+                "type":"web_search_20250305",
+                "name":"web_search",
+                "allowed_domains":["a.example", "b.example"],
+                "blocked_domains":["spam.example"]
+            }],
+            "tool_choice": {"type":"tool", "name":"web_search"}
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        let ResponsesTool::WebSearch(tool) = &out.tools.as_ref().unwrap()[0] else {
+            panic!("expected web_search tool");
+        };
+        let filters = tool.filters.as_ref().unwrap();
+        assert_eq!(
+            filters.allowed_domains.as_deref(),
+            Some(&["a.example".to_string(), "b.example".to_string()][..])
+        );
+        assert_eq!(
+            filters.blocked_domains.as_deref(),
+            Some(&["spam.example".to_string()][..])
+        );
+        assert_eq!(out.instructions.as_deref(), Some("Be brief."));
+        assert!(matches!(
+            out.tool_choice,
+            Some(ResponsesToolChoice::AllowedTools { .. })
+        ));
+    }
+
+    #[test]
+    fn unfiltered_web_search_adds_no_domain_instructions() {
+        for tool_choice in [None, Some(json!({"type":"tool", "name":"web_search"}))] {
+            let mut body = json!({
+                "model": "gpt-5.5",
+                "messages": [{"role":"user", "content":"find it"}],
+                "tools": [{"type":"web_search_20250305", "name":"web_search"}]
+            });
+            if let Some(tool_choice) = tool_choice {
+                body["tool_choice"] = tool_choice;
+            }
+            let req: MessagesRequest = serde_json::from_value(body).unwrap();
+            let out = translate_request(&req, opts()).unwrap();
+            let ResponsesTool::WebSearch(tool) = &out.tools.as_ref().unwrap()[0] else {
+                panic!("expected web_search tool");
+            };
+            assert!(tool.external_web_access);
+            assert!(tool.filters.is_none());
+            assert!(out.instructions.is_none());
+        }
     }
 
     #[test]
@@ -990,7 +1106,7 @@ mod tests {
         }));
         assert!(matches!(
             out.tool_choice,
-            Some(ResponsesToolChoice::WebSearch { .. })
+            Some(ResponsesToolChoice::AllowedTools { .. })
         ));
     }
 
