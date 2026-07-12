@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::anthropic::sse::parse_sse_events;
@@ -513,7 +514,7 @@ impl CodexHttpClient {
     }
 
     pub async fn stream_codex_websocket_events(
-        &self,
+        self: &Arc<Self>,
         body: &ResponsesRequest,
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationCandidate>,
@@ -526,88 +527,167 @@ impl CodexHttpClient {
             origin: CodexErrorOrigin::Auth,
         })?;
 
-        let pool_key = websocket_pool_key(ctx, continuation);
+        let pool_key = websocket_pool_key(ctx, continuation).map(str::to_string);
         if should_reset_websocket_pool(continuation)
-            && let Some(key) = pool_key
+            && let Some(key) = pool_key.as_deref()
         {
             super::websocket::invalidate_codex_websocket_pool_key(key);
         }
 
-        let ws_headers = build_codex_headers(&auth, ctx, body.client_metadata.is_some())?;
-        let ws_headers = super::websocket::codex_websocket_headers(&ws_headers);
-        let ws_body = build_websocket_request(body, continuation);
-
-        let first_stream = super::websocket::codex_websocket_event_stream(
-            &self.base_url,
-            &ws_headers,
-            &ws_body,
-            ctx,
-            ctx.traffic.clone(),
-            pool_key,
-            super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
-            super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
-            continuation,
-        )
-        .await?;
-
-        let can_retry_without_continuation = continuation
-            .and_then(|c| c.previous_response_id.as_deref())
-            .is_some();
-        if !can_retry_without_continuation {
-            return Ok(first_stream);
-        }
-
-        let retry_body = build_websocket_request(body, None);
-        let base_url = self.base_url.clone();
+        let client = self.clone();
+        let body = body.clone();
         let ctx = ctx.clone();
-        let pool_key = pool_key.map(str::to_string);
+        let continuation = continuation.cloned();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-
         tokio::spawn(async move {
-            let mut stream = first_stream;
-            let mut retry_available = true;
-            loop {
-                match stream.recv().await {
-                    Some(Err(err)) if retry_available && is_continuation_retry_error(&err) => {
-                        retry_available = false;
+            client
+                .coordinate_live_websocket_events(body, ctx, continuation, auth, pool_key, tx)
+                .await;
+        });
+
+        Ok(rx)
+    }
+
+    async fn coordinate_live_websocket_events(
+        &self,
+        body: ResponsesRequest,
+        ctx: RequestContext,
+        mut continuation: Option<super::continuation::ContinuationCandidate>,
+        mut auth: StoredAuth,
+        pool_key: Option<String>,
+        tx: tokio::sync::mpsc::Sender<Result<serde_json::Value, CodexError>>,
+    ) {
+        let mut auth_refresh_attempted = false;
+        let mut continuation_retry_available = continuation
+            .as_ref()
+            .and_then(|candidate| candidate.previous_response_id.as_deref())
+            .is_some();
+        let mut forwarded_any = false;
+
+        'attempt: loop {
+            let ws_headers = match build_codex_headers(&auth, &ctx, body.client_metadata.is_some())
+            {
+                Ok(headers) => super::websocket::codex_websocket_headers(&headers),
+                Err(err) => {
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            };
+            let ws_body = build_websocket_request(&body, continuation.as_ref());
+            let start = super::websocket::codex_websocket_event_stream(
+                &self.base_url,
+                &ws_headers,
+                &ws_body,
+                &ctx,
+                ctx.traffic.clone(),
+                pool_key.as_deref(),
+                super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
+                super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
+                continuation.as_ref(),
+            );
+            let mut stream = tokio::select! {
+                _ = tx.closed() => {
+                    if let Some(key) = pool_key.as_deref() {
+                        super::websocket::invalidate_codex_websocket_pool_key(key);
+                    }
+                    return;
+                }
+                result = start => match result {
+                    Ok(stream) => stream,
+                    Err(err) if err.status == 401 && !auth_refresh_attempted && !forwarded_any => {
+                        auth_refresh_attempted = true;
+                        if let Some(key) = pool_key.as_deref() {
+                            super::websocket::invalidate_codex_websocket_pool_key(key);
+                        }
+                        let refresh = self.auth_manager.force_refresh(&auth.access);
+                        auth = match tokio::select! {
+                            _ = tx.closed() => return,
+                            result = refresh => result,
+                        } {
+                            Ok(auth) => auth,
+                            Err(refresh_err) => {
+                                let _ = tx.send(Err(auth_refresh_error(refresh_err))).await;
+                                return;
+                            }
+                        };
+                        continue 'attempt;
+                    }
+                    Err(err) if continuation_retry_available && is_continuation_retry_error(&err) => {
+                        continuation_retry_available = false;
                         super::continuation::clear_continuation(ctx.session_id.as_deref());
                         if let Some(key) = pool_key.as_deref() {
                             super::websocket::invalidate_codex_websocket_pool_key(key);
                         }
-                        match super::websocket::codex_websocket_event_stream(
-                            &base_url,
-                            &ws_headers,
-                            &retry_body,
-                            &ctx,
-                            ctx.traffic.clone(),
-                            pool_key.as_deref(),
-                            super::websocket::WEBSOCKET_CONNECT_TIMEOUT_MS,
-                            super::websocket::WEBSOCKET_IDLE_TIMEOUT_MS,
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(retry_stream) => {
-                                stream = retry_stream;
-                                continue;
-                            }
-                            Err(retry_err) => {
-                                let _ = tx.send(Err(retry_err)).await;
-                                return;
-                            }
-                        }
+                        continuation = None;
+                        continue 'attempt;
                     }
-                    Some(item) => {
-                        if tx.send(item).await.is_err() {
+                    Err(err) => {
+                        let _ = tx.send(Err(err)).await;
+                        return;
+                    }
+                }
+            };
+
+            loop {
+                let item = tokio::select! {
+                    _ = tx.closed() => {
+                        if let Some(key) = pool_key.as_deref() {
+                            super::websocket::invalidate_codex_websocket_pool_key(key);
+                        }
+                        return;
+                    }
+                    item = stream.recv() => item,
+                };
+                let Some(item) = item else {
+                    return;
+                };
+
+                let unauthorized = match &item {
+                    Err(err) => err.status == 401,
+                    Ok(payload) => super::websocket::event_error_status(payload) == Some(401),
+                };
+                if unauthorized && !auth_refresh_attempted && !forwarded_any {
+                    auth_refresh_attempted = true;
+                    if let Some(key) = pool_key.as_deref() {
+                        super::websocket::invalidate_codex_websocket_pool_key(key);
+                    }
+                    let refresh = self.auth_manager.force_refresh(&auth.access);
+                    auth = match tokio::select! {
+                        _ = tx.closed() => return,
+                        result = refresh => result,
+                    } {
+                        Ok(auth) => auth,
+                        Err(refresh_err) => {
+                            let _ = tx.send(Err(auth_refresh_error(refresh_err))).await;
                             return;
                         }
+                    };
+                    continue 'attempt;
+                }
+
+                if let Err(err) = &item
+                    && continuation_retry_available
+                    && is_continuation_retry_error(err)
+                    && !forwarded_any
+                {
+                    continuation_retry_available = false;
+                    super::continuation::clear_continuation(ctx.session_id.as_deref());
+                    if let Some(key) = pool_key.as_deref() {
+                        super::websocket::invalidate_codex_websocket_pool_key(key);
                     }
-                    None => return,
+                    continuation = None;
+                    continue 'attempt;
+                }
+
+                forwarded_any = true;
+                if tx.send(item).await.is_err() {
+                    if let Some(key) = pool_key.as_deref() {
+                        super::websocket::invalidate_codex_websocket_pool_key(key);
+                    }
+                    return;
                 }
             }
-        });
-
-        Ok(rx)
+        }
     }
 
     async fn attempt_post_http(
@@ -839,6 +919,16 @@ fn summarize_json_request_size(body: &serde_json::Value, body_json: &str) -> ser
             .and_then(|v| v.as_array())
             .map(|items| items.len()),
     })
+}
+
+fn auth_refresh_error(err: anyhow::Error) -> CodexError {
+    CodexError {
+        status: 401,
+        message: "Unauthorized".to_string(),
+        detail: Some(err.to_string()),
+        retry_after: None,
+        origin: CodexErrorOrigin::Auth,
+    }
 }
 
 fn is_retryable_transport_error(err: &CodexError) -> bool {

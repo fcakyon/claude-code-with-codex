@@ -232,12 +232,25 @@ fn is_previous_response_missing(payload: &serde_json::Value) -> bool {
     false
 }
 
-fn extract_status_from_error(payload: &serde_json::Value) -> Option<u16> {
+pub(super) fn event_error_status(payload: &serde_json::Value) -> Option<u16> {
     payload
-        .get("error")
-        .and_then(|e| e.get("status"))
-        .and_then(|v| v.as_u64())
-        .map(|s| s as u16)
+        .get("status")
+        .or_else(|| payload.get("status_code"))
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            payload
+                .get("error")
+                .and_then(|error| error.get("status"))
+                .and_then(|value| value.as_u64())
+        })
+        .or_else(|| {
+            payload
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(|error| error.get("status"))
+                .and_then(|value| value.as_u64())
+        })
+        .and_then(|status| u16::try_from(status).ok())
 }
 
 #[allow(dead_code)]
@@ -348,7 +361,7 @@ pub async fn codex_websocket_request(
 
             // Extract status from error events
             let status = if terminal_event.event_type == "error" {
-                extract_status_from_error(&terminal_event.payload).unwrap_or(500)
+                event_error_status(&terminal_event.payload).unwrap_or(500)
             } else {
                 200
             };
@@ -415,7 +428,7 @@ pub async fn codex_websocket_request(
         }
 
         let status = if terminal_event.event_type == "error" {
-            extract_status_from_error(&terminal_event.payload).unwrap_or(500)
+            event_error_status(&terminal_event.payload).unwrap_or(500)
         } else {
             200
         };
@@ -993,7 +1006,7 @@ async fn stream_ws_events(
                 }
 
                 if parsed.get("type").and_then(|v| v.as_str()) == Some("error") {
-                    status = extract_status_from_error(&parsed).unwrap_or(500);
+                    status = event_error_status(&parsed).unwrap_or(500);
                 }
                 let terminal = is_terminal_event(&parsed);
                 if terminal && is_previous_response_missing(&parsed) {
