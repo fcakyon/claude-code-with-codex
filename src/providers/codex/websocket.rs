@@ -233,10 +233,17 @@ fn is_previous_response_missing(payload: &serde_json::Value) -> bool {
 }
 
 pub(super) fn event_error_status(payload: &serde_json::Value) -> Option<u16> {
+    if !matches!(
+        payload.get("type").and_then(|value| value.as_str()),
+        Some("error" | "response.error" | "response.failed")
+    ) {
+        return None;
+    }
+
     payload
         .get("status")
-        .or_else(|| payload.get("status_code"))
         .and_then(|value| value.as_u64())
+        .or_else(|| payload.get("status_code").and_then(|value| value.as_u64()))
         .or_else(|| {
             payload
                 .get("error")
@@ -1122,6 +1129,32 @@ fn summarize_json_request_size(body: &serde_json::Value, body_json: &str) -> ser
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_error_status_requires_error_event_and_checks_numeric_fallbacks() {
+        assert_eq!(
+            event_error_status(&serde_json::json!({
+                "type": "response.failed",
+                "status": "failed",
+                "status_code": 401
+            })),
+            Some(401)
+        );
+        assert_eq!(
+            event_error_status(&serde_json::json!({
+                "type": "response.completed",
+                "status_code": 401
+            })),
+            None
+        );
+        assert_eq!(
+            event_error_status(&serde_json::json!({
+                "type": "error",
+                "error": {"status": 401}
+            })),
+            Some(401)
+        );
+    }
 
     #[test]
     fn websocket_url_conversion() {

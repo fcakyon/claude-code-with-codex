@@ -600,11 +600,13 @@ impl CodexHttpClient {
                             super::websocket::invalidate_codex_websocket_pool_key(key);
                         }
                         let refresh = self.auth_manager.force_refresh(&auth.access);
-                        auth = match tokio::select! {
-                            _ = tx.closed() => return,
-                            result = refresh => result,
-                        } {
-                            Ok(auth) => auth,
+                        auth = match refresh.await {
+                            Ok(auth) => {
+                                if tx.is_closed() {
+                                    return;
+                                }
+                                auth
+                            },
                             Err(refresh_err) => {
                                 let _ = tx.send(Err(auth_refresh_error(refresh_err))).await;
                                 return;
@@ -668,7 +670,6 @@ impl CodexHttpClient {
                 if let Err(err) = &item
                     && continuation_retry_available
                     && is_continuation_retry_error(err)
-                    && !forwarded_any
                 {
                     continuation_retry_available = false;
                     super::continuation::clear_continuation(ctx.session_id.as_deref());

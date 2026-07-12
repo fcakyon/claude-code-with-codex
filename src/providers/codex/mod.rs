@@ -296,8 +296,7 @@ fn count_sse_events(bytes: &[u8]) -> u64 {
 enum LiveStreamStart {
     Response(Response),
     Retry {
-        message: String,
-        retry_after: Option<String>,
+        error: client::CodexError,
         full_context: bool,
     },
 }
@@ -357,8 +356,7 @@ async fn live_stream_response(
         {
             LiveStreamStart::Response(response) => return response,
             LiveStreamStart::Retry {
-                message,
-                retry_after,
+                error,
                 full_context,
             } => {
                 if full_context && drop_live_continuation_for_retry(&mut continuation, &ctx) {
@@ -367,12 +365,12 @@ async fn live_stream_response(
                 }
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES {
                     clear_continuation(ctx.session_id.as_deref());
-                    return json_error(StatusCode::BAD_GATEWAY, "api_error", message);
+                    return map_codex_error_to_response(&error);
                 }
-                let delay = compute_backoff_delay(attempt, retry_after.as_deref());
+                let delay = compute_backoff_delay(attempt, error.retry_after.as_deref());
                 if delay.exceeds_budget {
                     clear_continuation(ctx.session_id.as_deref());
-                    return json_error(StatusCode::BAD_GATEWAY, "api_error", message);
+                    return map_codex_error_to_response(&error);
                 }
                 attempt += 1;
                 sleep(delay.wait_ms).await;
@@ -398,8 +396,7 @@ async fn live_stream_response_once(
                 if retryable_live_start_codex_error(&err) {
                     let full_context = retry_with_full_context_for_live_error(&err);
                     return LiveStreamStart::Retry {
-                        message: codex_error_message(&err).to_string(),
-                        retry_after: err.retry_after,
+                        error: err,
                         full_context,
                     };
                 }
@@ -413,9 +410,25 @@ async fn live_stream_response_once(
             Ok(result) => result,
             Err(message) => {
                 if retryable_live_start_payload(&payload, &message) {
+                    let status = websocket::event_error_status(&payload).unwrap_or_else(|| {
+                        if payload.get("type").and_then(|value| value.as_str())
+                            == Some("codex.rate_limits")
+                        {
+                            429
+                        } else if message.to_ascii_lowercase().contains("overloaded") {
+                            529
+                        } else {
+                            503
+                        }
+                    });
                     return LiveStreamStart::Retry {
-                        message,
-                        retry_after: retry_after_from_live_payload(&payload),
+                        error: client::CodexError {
+                            status,
+                            message,
+                            detail: None,
+                            retry_after: retry_after_from_live_payload(&payload),
+                            origin: client::CodexErrorOrigin::WebSocket,
+                        },
                         full_context: false,
                     };
                 }
@@ -457,8 +470,13 @@ async fn live_stream_response_once(
     }
 
     LiveStreamStart::Retry {
-        message: "WebSocket connection closed before terminal Codex response event".to_string(),
-        retry_after: None,
+        error: client::CodexError {
+            status: 0,
+            message: "WebSocket connection closed before terminal Codex response event".to_string(),
+            detail: Some(websocket::WEBSOCKET_MISSING_TERMINAL_DETAIL.to_string()),
+            retry_after: None,
+            origin: client::CodexErrorOrigin::WebSocket,
+        },
         full_context: true,
     }
 }
