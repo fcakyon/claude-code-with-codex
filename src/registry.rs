@@ -60,6 +60,13 @@ pub struct Registry {
 impl Registry {
     pub fn new(alias_provider: AliasProvider) -> Self {
         let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        models.insert(
+            "anthropic".into(),
+            ANTHROPIC_STYLE_ALIASES
+                .iter()
+                .map(|alias| (*alias).to_string())
+                .collect(),
+        );
         models.insert("codex".into(), expand_codex_models());
         models.insert(
             "kimi".into(),
@@ -77,6 +84,7 @@ impl Registry {
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
             let handler: Arc<dyn Provider> = match name.as_str() {
+                "anthropic" => Arc::new(crate::providers::anthropic::AnthropicProvider::new()),
                 "codex" => Arc::new(crate::providers::codex::CodexProvider::new()),
                 "kimi" => Arc::new(crate::providers::kimi::KimiProvider::new()),
                 "cursor" => Arc::new(crate::providers::cursor::CursorProvider::new()),
@@ -144,15 +152,26 @@ impl Registry {
         session_affinity: Option<&AliasProvider>,
     ) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
-        if is_anthropic_alias(&normalized) {
-            let target = session_affinity.unwrap_or(&self.alias_provider);
-            return self.handlers.get(target.as_str()).cloned();
+        // Claude-shaped models always resolve to the configured alias target (the
+        // Anthropic passthrough by default). Session affinity is deliberately NOT
+        // consulted here: a codex request earlier in the same session must never drag
+        // the opus/haiku slots off the Anthropic backend. This is what lets the opus
+        // slot stay on Max while the sonnet slot runs on codex within one session.
+        let _ = session_affinity;
+        if is_anthropic_alias(&normalized) || normalized.starts_with("claude-") {
+            return self.handlers.get(self.alias_provider.as_str()).cloned();
         }
         if is_cursor_model(&normalized) {
             return self.handlers.get("cursor").cloned();
         }
 
+        // Exact model-name match reaches a specific backend regardless of the alias
+        // target: this is how `ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra` sends the
+        // sonnet slot to codex even while aliases default to the Anthropic passthrough.
         for (name, models) in &self.models {
+            if name == "anthropic" {
+                continue;
+            }
             if models.iter().any(|candidate| candidate == &normalized) {
                 return self.handlers.get(name).cloned();
             }
@@ -347,6 +366,37 @@ mod tests {
             assert!(p.is_some(), "{model} should route to a provider");
             assert_eq!(p.expect("provider").name(), "codex");
         }
+    }
+
+    #[test]
+    fn claude_models_route_to_anthropic_passthrough_by_default() {
+        let registry = Registry::new(AliasProvider::Anthropic);
+        for model in [
+            "opus",
+            "claude-opus-4-8",
+            "sonnet",
+            "haiku",
+            "claude-3-5-haiku-20241022",
+        ] {
+            let p = registry.provider_for_model(model, None);
+            assert!(p.is_some(), "{model} should route");
+            assert_eq!(p.expect("provider").name(), "anthropic", "{model}");
+        }
+    }
+
+    #[test]
+    fn explicit_codex_model_routes_to_codex_while_default_is_anthropic() {
+        let registry = Registry::new(AliasProvider::Anthropic);
+        let p = registry.provider_for_model("gpt-5.6-terra", None);
+        assert_eq!(p.expect("provider").name(), "codex");
+    }
+
+    #[test]
+    fn session_affinity_cannot_hijack_claude_slot() {
+        // Even if a prior codex request set Codex affinity, claude aliases stay on anthropic.
+        let registry = Registry::new(AliasProvider::Anthropic);
+        let p = registry.provider_for_model("claude-opus-4-8", Some(&AliasProvider::Codex));
+        assert_eq!(p.expect("provider").name(), "anthropic");
     }
 
     #[test]

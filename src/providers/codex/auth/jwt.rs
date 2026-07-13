@@ -36,7 +36,7 @@ pub struct TokenResponse {
     pub expires_in: Option<u64>,
 }
 
-fn parse_jwt_claims(token: &str) -> Option<IdTokenClaims> {
+fn decode_jwt_payload(token: &str) -> Option<Vec<u8>> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return None;
@@ -48,10 +48,21 @@ fn parse_jwt_claims(token: &str) -> Option<IdTokenClaims> {
         _ => payload_b64,
     };
     use base64::Engine;
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(&padded)
-        .ok()?;
-    serde_json::from_slice(&decoded).ok()
+    base64::engine::general_purpose::STANDARD.decode(&padded).ok()
+}
+
+fn parse_jwt_claims(token: &str) -> Option<IdTokenClaims> {
+    serde_json::from_slice(&decode_jwt_payload(token)?).ok()
+}
+
+/// Decode a JWT's `exp` claim (seconds since the Unix epoch) into epoch milliseconds.
+pub fn token_exp_ms(token: &str) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct ExpClaim {
+        exp: Option<u64>,
+    }
+    let claim: ExpClaim = serde_json::from_slice(&decode_jwt_payload(token)?).ok()?;
+    claim.exp.map(|secs| secs.saturating_mul(1000))
 }
 
 fn extract_account_id_from_claims(claims: &IdTokenClaims) -> Option<String> {

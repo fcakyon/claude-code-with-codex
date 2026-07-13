@@ -47,7 +47,9 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
 
     pub async fn get_auth(&self) -> Result<StoredAuth, anyhow::Error> {
         let stored = self.load_auth()?.ok_or_else(|| {
-            anyhow::anyhow!("Not authenticated. Run: claude-code-proxy codex auth login")
+            anyhow::anyhow!(
+                "No Codex credentials. Log in with the Codex CLI (`codex login`) to create ~/.codex/auth.json"
+            )
         })?;
 
         if stored.expires > Self::now_ms() + REFRESH_MARGIN_MS {
@@ -219,7 +221,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("Not authenticated")
+                .contains("No Codex credentials")
         );
     }
 

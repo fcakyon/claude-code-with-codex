@@ -878,6 +878,7 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
         provider: "cursor".into(),
         traffic: None,
         monitor: None,
+        passthrough: None,
     };
 
     let response = provider.handle_messages(body, ctx).await;

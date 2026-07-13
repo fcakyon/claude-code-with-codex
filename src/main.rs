@@ -177,10 +177,7 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
             claude_code_proxy::provider::AuthCommand::Status => {
                 if let Err(err) = handlers.status() {
                     println!("{err}");
-                    if err.to_string() == "Not authenticated" {
-                        std::process::exit(1);
-                    }
-                    std::process::exit(2);
+                    std::process::exit(1);
                 }
                 Ok(())
             }
@@ -238,11 +235,13 @@ fn print_server_banner(port: u16, registry: &Registry) {
     }
     print_models(registry, false);
     println!();
-    println!("Configure Claude Code (pick a model from above):");
+    println!("Configure Claude Code:");
     println!("  export ANTHROPIC_BASE_URL=\"http://localhost:{port}\"");
-    println!("  export ANTHROPIC_AUTH_TOKEN=\"anything\"");
-    println!("  export ANTHROPIC_MODEL=\"gpt-5.6-sol\"");
-    println!("  export ANTHROPIC_SMALL_FAST_MODEL=\"gpt-5.6-luna\"");
+    println!("  # Leave ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY unset: Claude Code");
+    println!("  # forwards your Claude subscription login for claude-* models, and any");
+    println!("  # token set here overrides it and breaks the Claude route (401).");
+    println!("  export ANTHROPIC_DEFAULT_OPUS_MODEL=\"claude-opus-4-8\"   # opus slot -> Claude");
+    println!("  export ANTHROPIC_DEFAULT_SONNET_MODEL=\"gpt-5.6-terra\"  # sonnet slot -> a backend above");
     println!("  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1");
 }
 

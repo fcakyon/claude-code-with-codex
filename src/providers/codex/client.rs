@@ -1270,6 +1270,7 @@ mod tests {
             provider: "codex".into(),
             traffic: None,
             monitor: None,
+            passthrough: None,
         }
     }
 
@@ -1647,6 +1648,7 @@ mod tests {
             provider: "codex".into(),
             traffic: None,
             monitor: None,
+            passthrough: None,
         };
         let headers = build_codex_headers(&auth, &ctx, false).unwrap();
         assert_eq!(
@@ -1671,6 +1673,7 @@ mod tests {
             provider: "codex".into(),
             traffic: None,
             monitor: None,
+            passthrough: None,
         };
         let headers = build_codex_headers(&auth, &ctx, true).unwrap();
         assert_eq!(
@@ -1697,6 +1700,7 @@ mod tests {
             provider: "codex".into(),
             traffic: None,
             monitor: None,
+            passthrough: None,
         };
         let headers = build_codex_headers(&auth, &ctx, false).unwrap();
         assert!(headers.get("session_id").is_none());
@@ -1718,6 +1722,7 @@ mod tests {
             provider: "codex".into(),
             traffic: None,
             monitor: None,
+            passthrough: None,
         };
         let err = build_codex_headers(&auth, &ctx, false).unwrap_err();
         assert_eq!(err.status, 500);
@@ -1773,6 +1778,7 @@ mod tests {
             provider: "codex".into(),
             traffic: None,
             monitor: None,
+            passthrough: None,
         };
         let disabled = super::super::continuation::ContinuationCandidate {
             previous_response_id: None,
@@ -1842,6 +1848,7 @@ mod tests {
             provider: "codex".into(),
             traffic: None,
             monitor: None,
+            passthrough: None,
         };
         let result = build_codex_headers(&auth, &ctx, false);
         assert!(

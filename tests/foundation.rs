@@ -261,7 +261,10 @@ fn config_env_precedence_and_defaults() {
 
 #[test]
 fn alias_provider_has_expected_default() {
-    assert!(matches!(load_config().alias_provider, AliasProvider::Codex));
+    assert!(matches!(
+        load_config().alias_provider,
+        AliasProvider::Anthropic
+    ));
 }
 
 #[test]

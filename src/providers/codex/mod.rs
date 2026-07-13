@@ -23,9 +23,6 @@ use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::registry;
 use crate::retry::{compute_backoff_delay, sleep};
 
-use self::auth::browser_login::run_browser_login;
-use self::auth::device::DeviceAuthClient;
-use self::auth::manager::CodexAuthManager;
 use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
 use self::continuation::{
@@ -836,27 +833,15 @@ pub(crate) struct CodexCli;
 
 impl CliHandlers for CodexCli {
     fn login(&self) -> Result<(), anyhow::Error> {
-        let tokens = run_browser_login()?;
-        let store = file_store();
-        let manager = CodexAuthManager::new(store);
-        let saved = manager.persist_initial_tokens(&tokens)?;
-        print!(
-            "{}",
-            format_auth_saved_output(&manager.store.auth_path(), saved.account_id.as_deref())
-        );
-        Ok(())
+        anyhow::bail!(
+            "Codex auth is provided by the Codex CLI. Run `codex login` to create ~/.codex/auth.json; this proxy reads it directly."
+        )
     }
 
     fn device(&self) -> Result<(), anyhow::Error> {
-        let tokens = DeviceAuthClient::new().run()?;
-        let store = file_store();
-        let manager = CodexAuthManager::new(store);
-        let saved = manager.persist_initial_tokens(&tokens)?;
-        print!(
-            "{}",
-            format_auth_saved_output(&manager.store.auth_path(), saved.account_id.as_deref())
-        );
-        Ok(())
+        anyhow::bail!(
+            "Codex auth is provided by the Codex CLI. Run `codex login` to create ~/.codex/auth.json; this proxy reads it directly."
+        )
     }
 
     fn status(&self) -> Result<(), anyhow::Error> {
@@ -869,19 +854,20 @@ impl CliHandlers for CodexCli {
                     auth.account_id.as_deref().unwrap_or("(none)")
                 );
                 println!("{}", format_expiry(auth.expires, now_ms()));
-                println!("Storage: {}", store.auth_path());
+                println!("Storage: {} (Codex CLI)", store.auth_path());
                 Ok(())
             }
-            None => {
-                anyhow::bail!("Not authenticated");
-            }
+            None => anyhow::bail!(
+                "No Codex credentials. Run `codex login` to create {}",
+                store.auth_path()
+            ),
         }
     }
 
     fn logout(&self) -> Result<(), anyhow::Error> {
-        let store = file_store();
-        store.clear_auth()?;
-        println!("Logged out");
+        println!(
+            "Codex credentials are managed by the Codex CLI; run `codex logout` to remove them"
+        );
         Ok(())
     }
 }
@@ -912,14 +898,6 @@ fn format_expiry(expires: u64, now: u64) -> String {
         })
         .unwrap_or_else(|| "invalid".to_string());
     format!("Expires: {iso} (in {remaining}s)")
-}
-
-fn format_auth_saved_output(auth_path: &str, account_id: Option<&str>) -> String {
-    let mut out = format!("Auth saved in {auth_path}\n");
-    if let Some(account_id) = account_id {
-        out.push_str(&format!("Account: {account_id}\n"));
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -990,6 +968,7 @@ mod tests {
             provider: "codex".to_string(),
             traffic: None,
             monitor: Some(monitor.clone()),
+            passthrough: None,
         };
         let chunk = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":12,\"output_tokens\":48}}\n\n";
 
@@ -1010,22 +989,6 @@ mod tests {
         assert!(models.contains(&"gpt-5.6-luna".to_string()));
         assert!(models.contains(&"gpt-5.4".to_string()));
         assert!(models.contains(&"gpt-5.4-mini".to_string()));
-    }
-
-    #[test]
-    fn format_auth_saved_output_with_account() {
-        assert_eq!(
-            format_auth_saved_output("/tmp/auth.json", Some("acct_1")),
-            "Auth saved in /tmp/auth.json\nAccount: acct_1\n"
-        );
-    }
-
-    #[test]
-    fn format_auth_saved_output_without_account() {
-        assert_eq!(
-            format_auth_saved_output("/tmp/auth.json", None),
-            "Auth saved in /tmp/auth.json\n"
-        );
     }
 
     #[test]

@@ -43,4 +43,19 @@ pub struct RequestContext {
     pub provider: String,
     pub traffic: Option<Arc<TrafficCapture>>,
     pub monitor: Option<MonitorHandle>,
+    /// Raw request material for byte-passthrough providers (the Anthropic backend).
+    /// Present on real HTTP requests; None in unit tests. Forwarding these verbatim
+    /// keeps the prompt-cache prefix byte-identical.
+    pub passthrough: Option<Passthrough>,
+}
+
+/// Untranslated request material needed to relay a request to an upstream verbatim.
+#[derive(Debug, Clone)]
+pub struct Passthrough {
+    /// Original request body bytes, forwarded without reserialization.
+    pub raw_body: axum::body::Bytes,
+    /// Original client request headers (carry Authorization + anthropic-beta).
+    pub headers: axum::http::HeaderMap,
+    /// Original path and query, e.g. `/v1/messages?beta=true`.
+    pub path_and_query: String,
 }

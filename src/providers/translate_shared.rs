@@ -2,6 +2,20 @@ use serde_json::Value;
 
 use crate::anthropic::schema::MessagesRequest;
 
+/// Tags wrapping a prior-turn `thinking` block when it is rehydrated as plain text for a
+/// backend that cannot take it in native form (Anthropic rejects a signature-less
+/// `thinking` block; the codex Responses translation has no `thinking` container). Fixed
+/// strings so the rewrite stays byte-stable across turns and keeps the prompt-cache
+/// prefix intact. Shared by the anthropic passthrough and the codex request builder so
+/// reasoning is marked identically in both switch directions.
+pub const REASONING_OPEN: &str = "<previous_reasoning>";
+pub const REASONING_CLOSE: &str = "</previous_reasoning>";
+
+/// Wrap reasoning text in the shared `<previous_reasoning>` tags.
+pub fn wrap_reasoning(reasoning: &str) -> String {
+    format!("{REASONING_OPEN}\n{reasoning}\n{REASONING_CLOSE}")
+}
+
 #[derive(Debug)]
 pub enum ContentBlock {
     Text {
