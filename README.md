@@ -1,5 +1,8 @@
 # claude-code-with-codex
 
+[![crates.io](https://img.shields.io/crates/v/claude-codex.svg)](https://crates.io/crates/claude-codex)
+[![CI](https://github.com/fcakyon/claude-code-with-codex/actions/workflows/ci.yml/badge.svg)](https://github.com/fcakyon/claude-code-with-codex/actions/workflows/ci.yml)
+
 Use Claude Code with your **Claude subscription and your ChatGPT (Codex)
 subscription at the same time**, and switch between them mid-conversation.
 
