@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
-# claude-code-proxy installation script
+# claude-codex installation script
 # Usage: curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh | bash
 #
 # Environment variables:
-#   CLAUDE_CODE_PROXY_VERSION      - Pin a specific version (e.g., v0.1.0)
-#   CLAUDE_CODE_PROXY_INSTALL_DIR  - Override install directory (default: /usr/local/bin or ~/.local/bin)
+#   CLAUDE_CODEX_VERSION      - Pin a specific version (e.g., v0.1.0)
+#   CLAUDE_CODEX_INSTALL_DIR  - Override install directory (default: /usr/local/bin or ~/.local/bin)
 #
 # Examples:
-#   CLAUDE_CODE_PROXY_VERSION=v0.1.0 bash install.sh
-#   CLAUDE_CODE_PROXY_INSTALL_DIR=/opt/bin bash install.sh
+#   CLAUDE_CODEX_VERSION=v0.1.0 bash install.sh
+#   CLAUDE_CODEX_INSTALL_DIR=/opt/bin bash install.sh
 #
 
 set -e
 
-BIN_NAME="claude-code-proxy"
+BIN_NAME="claude-codex"
 REPO="fcakyon/claude-code-with-codex"
 
 RED='\033[0;31m'
@@ -70,7 +70,7 @@ install_from_release() {
 	tmp_dir=$(mktemp -d)
 	trap 'rm -rf "$tmp_dir"' EXIT
 
-	local version="${CLAUDE_CODE_PROXY_VERSION:-}"
+	local version="${CLAUDE_CODEX_VERSION:-}"
 
 	if [ -z "$version" ]; then
 		log_info "Fetching latest release..."
@@ -93,7 +93,7 @@ install_from_release() {
 			echo ""
 			echo "This might be due to network issues or GitHub API rate limits."
 			echo "You can specify a version manually:"
-			echo "  CLAUDE_CODE_PROXY_VERSION=v0.1.0 bash install.sh"
+			echo "  CLAUDE_CODEX_VERSION=v0.1.0 bash install.sh"
 			echo ""
 			exit 1
 		fi
@@ -166,7 +166,7 @@ install_from_release() {
 		exit 1
 	fi
 
-	local install_dir="${CLAUDE_CODE_PROXY_INSTALL_DIR:-}"
+	local install_dir="${CLAUDE_CODEX_INSTALL_DIR:-}"
 	if [ -z "$install_dir" ]; then
 		if [[ -w /usr/local/bin ]]; then
 			install_dir="/usr/local/bin"

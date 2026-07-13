@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  BIN_NAME: claude-code-proxy
+  BIN_NAME: claude-codex
 
 jobs:
   checks:
@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked -- --test-threads=1
 
   build:
     needs: checks
@@ -69,7 +69,7 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          expected="claude-code-proxy ${VERSION#v}"
+          expected="claude-codex ${VERSION#v}"
           actual="$(target/${{ matrix.target }}/release/${BIN_NAME} --version)"
           test "$actual" = "$expected"
       - name: Verify Windows binary
@@ -78,7 +78,7 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          $expected = "claude-code-proxy $($env:VERSION.TrimStart('v'))"
+          $expected = "claude-codex $($env:VERSION.TrimStart('v'))"
           $actual = & "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" --version
           if ($actual -ne $expected) {
             Write-Error "expected '$expected', got '$actual'"
@@ -117,8 +117,8 @@ jobs:
           name: windows-amd64
       - shell: pwsh
         run: |
-          Expand-Archive claude-code-proxy-windows-amd64.zip -DestinationPath .
-          .\claude-code-proxy.exe --version
+          Expand-Archive claude-codex-windows-amd64.zip -DestinationPath .
+          .\claude-codex.exe --version
 
   release:
     needs: [build, smoke-windows]
@@ -131,78 +131,8 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.RELEASE_TOKEN }}
           generate_release_notes: true
           files: |
             *.tar.gz
             *.zip
             *.sha256
-
-  update-tap:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v5
-        with:
-          merge-multiple: true
-      - uses: actions/checkout@v5
-        with:
-          repository: raine/homebrew-claude-code-proxy
-          token: ${{ secrets.RELEASE_TOKEN }}
-          path: tap
-      - name: Generate formula and push to tap
-        env:
-          VERSION: ${{ github.ref_name }}
-        run: |
-          VERSION="${VERSION#v}"
-          SHA_ARM=$(awk '{print $1}' claude-code-proxy-darwin-arm64.sha256)
-          SHA_INTEL=$(awk '{print $1}' claude-code-proxy-darwin-amd64.sha256)
-          SHA_LINUX_AMD=$(awk '{print $1}' claude-code-proxy-linux-amd64.sha256)
-          SHA_LINUX_ARM=$(awk '{print $1}' claude-code-proxy-linux-arm64.sha256)
-
-          mkdir -p tap/Formula
-          cat > tap/Formula/claude-code-proxy.rb << EOF
-          class ClaudeCodeProxy < Formula
-            desc "Local proxy: Claude Code to ChatGPT subscription via Codex Responses API"
-            homepage "https://github.com/raine/claude-code-proxy"
-            version "${VERSION}"
-            license "MIT"
-
-            on_macos do
-              if Hardware::CPU.arm?
-                url "https://github.com/raine/claude-code-proxy/releases/download/v${VERSION}/claude-code-proxy-darwin-arm64.tar.gz"
-                sha256 "${SHA_ARM}"
-              else
-                url "https://github.com/raine/claude-code-proxy/releases/download/v${VERSION}/claude-code-proxy-darwin-amd64.tar.gz"
-                sha256 "${SHA_INTEL}"
-              end
-            end
-
-            on_linux do
-              if Hardware::CPU.arm?
-                url "https://github.com/raine/claude-code-proxy/releases/download/v${VERSION}/claude-code-proxy-linux-arm64.tar.gz"
-                sha256 "${SHA_LINUX_ARM}"
-              else
-                url "https://github.com/raine/claude-code-proxy/releases/download/v${VERSION}/claude-code-proxy-linux-amd64.tar.gz"
-                sha256 "${SHA_LINUX_AMD}"
-              end
-            end
-
-            def install
-              bin.install "claude-code-proxy"
-            end
-
-            test do
-              assert_match version.to_s, shell_output("\#{bin}/claude-code-proxy --version")
-            end
-          end
-          EOF
-          sed -i 's/^          //' tap/Formula/claude-code-proxy.rb
-
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/claude-code-proxy.rb
-          git commit -m "claude-code-proxy ${VERSION}"
-          git pull --rebase
-          git push
