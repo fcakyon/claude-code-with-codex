@@ -51,6 +51,29 @@ changes made on top of it.
   proxy has no Codex login of its own. Token refresh writes back to that file so
   the Codex CLI keeps working (OpenAI rotates the refresh token on use).
 
+## Naming and distribution
+
+The crate, the installed command, and the library target are all `claude-codex`
+(`claude_codex` for the library, derived automatically from the package name).
+The crates.io package is `claude-codex`. The GitHub repository stays
+`claude-code-with-codex`.
+
+Some strings deliberately keep the old `claude-code-proxy` name because they are
+compatibility contracts, not the user-facing name. Do not rename them in a
+future cleanup:
+
+- The on-disk config and data directory and the macOS Keychain service, in
+  `paths.rs`, `providers/kimi/auth`, and `providers/cursor/auth.rs`. Renaming
+  these orphans any saved kimi, grok, or cursor login. `paths.rs` already has
+  `legacy_config_dir` as the migration hook if this is ever changed on purpose.
+- The Codex `ORIGINATOR` and `User-Agent` in `providers/codex`. These go to the
+  ChatGPT backend, so keep them stable to avoid changing what the server sees.
+
+Two install paths ship. crates.io via `cargo install claude-codex`, and prebuilt
+binaries from the `v*`-tag release workflow in `.github/workflows/release.yml`.
+That workflow uses the default `GITHUB_TOKEN` and needs no secrets or Homebrew
+tap.
+
 ## Build and test
 
 - `cargo build`

@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.0 (2026-07-13)
+
+- Claude Code can now run on your Claude subscription and your ChatGPT (Codex)
+  subscription at the same time, routed per request by model name. Claude models
+  relay straight to Anthropic reusing Claude Code's own login, and gpt-5.6 models
+  go to the ChatGPT plan through the Codex login.
+- Reasoning is carried across a mid-conversation model switch. Earlier thinking
+  is kept as tagged text so moving a conversation between the two plans does not
+  lose context.
+- The Codex login is read from the Codex CLI's own auth.json, so the proxy and
+  the Codex CLI no longer invalidate each other's session.
+- The command and crate are now named claude-codex. Install it from crates.io
+  with `cargo install claude-codex`, or download a prebuilt binary from the
+  releases page with no Rust needed.
+
 ## v0.1.15 (2026-07-12)
 
 - Codex function tools preserve optional parameters, preventing unintended tool

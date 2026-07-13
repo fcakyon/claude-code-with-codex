@@ -25,27 +25,31 @@ your ChatGPT plan, in the same session, and flip between them whenever you want.
 
 - **Claude Code** installed and signed in with a **Claude Pro or Max** plan.
 - A **ChatGPT Plus, Pro, or Team** plan and the **Codex CLI** signed in.
-- **Rust** to build the proxy (one command below installs it).
+- **Rust** only if you install from crates.io or source. The prebuilt binary needs nothing.
 
 ## Quickstart
 
 Copy-paste, top to bottom.
 
 ```sh
-# 1. Install Rust if you do not have it
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
+# 1. Install claude-codex. Pick ONE:
 
-# 2. Install the proxy (installs the `claude-code-proxy` command)
-cargo install --git https://github.com/fcakyon/claude-code-with-codex --locked
+#    a) Prebuilt binary, no Rust needed (macOS and Linux):
+curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh | bash
 
-# 3. Sign in to your ChatGPT plan through the Codex CLI
+#    b) From crates.io, if you have Rust (rustup.rs):
+cargo install claude-codex --locked
+
+# 2. Sign in to your ChatGPT plan through the Codex CLI
 codex login
-claude-code-proxy codex auth status # should print your account and expiry
+claude-codex codex auth status # should print your account and expiry
 
-# 4. Start the proxy and leave it running
-claude-code-proxy serve # listens on 127.0.0.1:18765
+# 3. Start the proxy and leave it running
+claude-codex serve # listens on 127.0.0.1:18765
 ```
+
+To build from a specific commit instead, use
+`cargo install --git https://github.com/fcakyon/claude-code-with-codex --locked`.
 
 Then, in a second terminal, point Claude Code at the proxy and launch it:
 
@@ -76,7 +80,7 @@ To make it permanent, put the `export` lines in your `~/.zshrc` or `~/.bashrc`.
   (your ChatGPT plan). Switch as often as you like, even mid-conversation.
 - **A specific model for one run.** `claude --model gpt-5.6-terra` or
   `claude --model claude-opus-4-8`.
-- **List what is available.** `claude-code-proxy models`.
+- **List what is available.** `claude-codex models`.
 
 Reasoning is carried across a switch. When you move a conversation from one plan
 to the other, the earlier turn's thinking is kept and shown to the next model as
@@ -113,7 +117,7 @@ Do not set `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`. Either one overrides
 the Claude subscription login and the Claude route returns 401.
 
 The proxy listens on `127.0.0.1:18765` by default. Change it with
-`PORT=11435 claude-code-proxy serve`, and match `ANTHROPIC_BASE_URL`.
+`PORT=11435 claude-codex serve`, and match `ANTHROPIC_BASE_URL`.
 
 Background requests Claude Code makes for its small, fast model use a Claude id
 by default, so they run on your Claude plan. Set `ANTHROPIC_DEFAULT_HAIKU_MODEL`
@@ -122,14 +126,12 @@ to a `gpt-5.6-*` id if you would rather run them on your ChatGPT plan.
 ## Other backends
 
 The same proxy can also route to **Kimi**, **Grok**, and **Cursor** models, each
-with its own login. Run `claude-code-proxy models` to see every id, and
-`claude-code-proxy <backend> auth status` to check a login. These backends keep
+with its own login. Run `claude-codex models` to see every id, and
+`claude-codex <backend> auth status` to check a login. These backends keep
 the behavior of the upstream project this is based on.
 
 ## Limitations
 
-- Building needs the Rust toolchain. There is no Homebrew formula or prebuilt
-  binary for this fork yet.
 - Switching plans in the middle of an active tool call (for example pressing Esc
   during a tool use, then switching and continuing) can fail, because the next
   model cannot verify reasoning that came from the other plan. Starting the next
