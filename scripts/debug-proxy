@@ -3,16 +3,16 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Start an isolated claude-code-proxy debugging instance on a random localhost port.
+Start an isolated claude-codex debugging instance on a random localhost port.
 
 Usage:
   scripts/debug-proxy
   scripts/debug-proxy --help
 
 Prerequisites:
-  - Run from a checkout of claude-code-proxy.
+  - Run from a checkout of claude-codex.
   - Install cargo, curl, and the upstream provider credentials you need.
-  - Authenticate providers with the normal `claude-code-proxy <provider> auth`
+  - Authenticate providers with the normal `claude-codex <provider> auth`
     commands. This helper reads the normal config directory, so existing logins
     remain available.
 
@@ -49,10 +49,10 @@ for command in git cargo curl; do
 done
 
 if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  printf 'error: run this helper from a claude-code-proxy checkout\n' >&2
+  printf 'error: run this helper from a claude-codex checkout\n' >&2
   exit 1
 fi
-run_dir="$(mktemp -d "${TMPDIR:-/tmp}/claude-code-proxy-debug.XXXXXX")"
+run_dir="$(mktemp -d "${TMPDIR:-/tmp}/claude-codex-debug.XXXXXX")"
 state_home="$run_dir/state"
 server_log="$run_dir/server.log"
 client_env="$run_dir/client.env"
@@ -71,7 +71,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 cd "$repo_root"
-cargo build --quiet --bin claude-code-proxy
+cargo build --quiet --bin claude-codex
 
 for _attempt in {1..20}; do
   proxy_port=$((49152 + (RANDOM % 16384)))
@@ -81,7 +81,7 @@ for _attempt in {1..20}; do
   CCP_LOG_STDERR=1 \
   CCP_LOG_VERBOSE=1 \
   CCP_TRAFFIC_LOG=1 \
-    "$repo_root/target/debug/claude-code-proxy" serve \
+    "$repo_root/target/debug/claude-codex" serve \
       --port "$proxy_port" \
       --no-monitor >> "$server_log" 2>&1 &
   proxy_pid=$!

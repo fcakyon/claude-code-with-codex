@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
-use claude_code_proxy::{
+use claude_codex::{
     config, logging,
     monitor::MonitorHandle,
     paths,
@@ -14,7 +14,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "claude-code-proxy",
+    name = "claude-codex",
     version = VERSION,
     about = "Anthropic-compatible proxy for Claude Code provider backends",
     disable_version_flag = true
@@ -62,7 +62,7 @@ enum Commands {
 enum ProviderGroup {
     Auth {
         #[command(subcommand)]
-        command: claude_code_proxy::provider::AuthCommand,
+        command: claude_codex::provider::AuthCommand,
     },
 }
 
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.version_flag {
-        println!("claude-code-proxy {}", VERSION);
+        println!("claude-codex {}", VERSION);
         return Ok(());
     }
 
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
 
     match commands {
         Commands::Version => {
-            println!("claude-code-proxy {}", VERSION);
+            println!("claude-codex {}", VERSION);
             Ok(())
         }
         Commands::Serve { port, no_monitor } => {
@@ -160,28 +160,28 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     let handlers = provider.cli();
     match command {
         ProviderGroup::Auth { command } => match command {
-            claude_code_proxy::provider::AuthCommand::Login => {
+            claude_codex::provider::AuthCommand::Login => {
                 if let Err(err) = handlers.login() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            claude_code_proxy::provider::AuthCommand::Device => {
+            claude_codex::provider::AuthCommand::Device => {
                 if let Err(err) = handlers.device() {
                     eprintln!("{err}");
                     std::process::exit(2);
                 }
                 Ok(())
             }
-            claude_code_proxy::provider::AuthCommand::Status => {
+            claude_codex::provider::AuthCommand::Status => {
                 if let Err(err) = handlers.status() {
                     println!("{err}");
                     std::process::exit(1);
                 }
                 Ok(())
             }
-            claude_code_proxy::provider::AuthCommand::Logout => {
+            claude_codex::provider::AuthCommand::Logout => {
                 handlers.logout()?;
                 Ok(())
             }
@@ -222,7 +222,7 @@ fn compact_cursor_list(models: &[String]) -> String {
     if !dynamic.is_empty() {
         out.push_str(", example: cursor:gpt-5.5");
     }
-    out.push_str(" run `claude-code-proxy models --full` for all aliases");
+    out.push_str(" run `claude-codex models --full` for all aliases");
     out
 }
 

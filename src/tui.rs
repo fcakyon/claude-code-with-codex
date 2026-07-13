@@ -357,7 +357,7 @@ fn render_header(
         .unwrap_or_else(|_| Duration::from_secs(0));
     let text = Line::from(vec![
         Span::styled(
-            " claude-code-proxy",
+            " claude-codex",
             Style::default()
                 .fg(BG)
                 .bg(TEAL)

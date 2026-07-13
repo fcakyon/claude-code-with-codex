@@ -4,9 +4,9 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
-use claude_code_proxy::providers::codex::continuation::clear_all_continuations_for_tests;
-use claude_code_proxy::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
-use claude_code_proxy::{registry::Registry, server::app};
+use claude_codex::providers::codex::continuation::clear_all_continuations_for_tests;
+use claude_codex::providers::codex::websocket::clear_codex_websocket_pool_for_tests;
+use claude_codex::{registry::Registry, server::app};
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};

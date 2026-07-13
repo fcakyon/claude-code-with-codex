@@ -160,7 +160,7 @@ pub fn cursor_auth_location() -> String {
 pub fn missing_auth_message() -> String {
     [
         "Cursor authentication was not found.",
-        "Run `claude-code-proxy cursor auth login`, or set CCP_CURSOR_AUTH_TOKEN/CURSOR_AUTH_TOKEN.",
+        "Run `claude-codex cursor auth login`, or set CCP_CURSOR_AUTH_TOKEN/CURSOR_AUTH_TOKEN.",
         "The proxy stores Cursor credentials in its own claude-code-proxy.cursor storage, not Cursor Agent's Keychain/auth.json.",
     ]
     .join(" ")
@@ -172,7 +172,7 @@ pub fn expired_auth_message(auth: &CursorAuth) -> String {
         .map(format_unix_ms)
         .unwrap_or_else(|| "unknown".to_string());
     format!(
-        "Cursor access token from {} is expired or near expiry ({}). Run `claude-code-proxy cursor auth login` again or set CCP_CURSOR_AUTH_TOKEN.",
+        "Cursor access token from {} is expired or near expiry ({}). Run `claude-codex cursor auth login` again or set CCP_CURSOR_AUTH_TOKEN.",
         auth.source, expires
     )
 }

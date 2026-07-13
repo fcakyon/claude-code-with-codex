@@ -1,12 +1,12 @@
-use claude_code_proxy::anthropic::{
+use claude_codex::anthropic::{
     encode_sse_event, parse_sse_events, parse_sse_events_with_stats, schema::MessagesRequest,
 };
-use claude_code_proxy::auth::{AuthStorage, InMemoryAuthStore};
-use claude_code_proxy::config::{AliasProvider, load_config};
-use claude_code_proxy::logging::{create_logger, redact_value};
-use claude_code_proxy::paths::{self, DirResolverEnv};
-use claude_code_proxy::retry::{RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS, compute_backoff_delay};
-use claude_code_proxy::traffic::{
+use claude_codex::auth::{AuthStorage, InMemoryAuthStore};
+use claude_codex::config::{AliasProvider, load_config};
+use claude_codex::logging::{create_logger, redact_value};
+use claude_codex::paths::{self, DirResolverEnv};
+use claude_codex::retry::{RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS, compute_backoff_delay};
+use claude_codex::traffic::{
     MAX_SSE_CAPTURE_BYTES, TrafficCaptureOptions, create_traffic_capture, redact_traffic,
     sanitize_path_part, traffic_capture_enabled_for_env,
 };

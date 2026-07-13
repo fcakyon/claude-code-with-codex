@@ -37,7 +37,7 @@
 
             installPhase = ''
               runHook preInstall
-              install -Dm755 target/release/claude-code-proxy "$out/bin/claude-code-proxy"
+              install -Dm755 target/release/claude-codex "$out/bin/claude-codex"
               runHook postInstall
             '';
 
@@ -45,7 +45,7 @@
               description = cargoToml.package.description;
               homepage = "https://github.com/raine/claude-code-proxy";
               license = licenses.mit;
-              mainProgram = "claude-code-proxy";
+              mainProgram = "claude-codex";
             };
           };
         }
@@ -54,7 +54,7 @@
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/claude-code-proxy";
+          program = "${self.packages.${system}.default}/bin/claude-codex";
         };
       });
 
