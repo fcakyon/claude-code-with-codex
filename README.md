@@ -29,27 +29,41 @@ your ChatGPT plan, in the same session, and flip between them whenever you want.
 
 ## Quickstart
 
-Copy-paste, top to bottom.
+Three steps, each block is copy-paste ready.
+
+**1. Install `claude-codex`** (pick one).
+
+Prebuilt binary, no Rust needed (macOS and Linux):
 
 ```sh
-# 1. Install claude-codex. Pick ONE:
-
-#    a) Prebuilt binary, no Rust needed (macOS and Linux):
 curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh | bash
-
-#    b) From crates.io, if you have Rust (rustup.rs):
-cargo install claude-codex --locked
-
-# 2. Sign in to your ChatGPT plan through the Codex CLI
-codex login
-claude-codex codex auth status # should print your account and expiry
-
-# 3. Start the proxy and leave it running
-claude-codex serve # listens on 127.0.0.1:18765
 ```
 
-To build from a specific commit instead, use
-`cargo install --git https://github.com/fcakyon/claude-code-with-codex --locked`.
+Or from crates.io, if you have Rust ([rustup.rs](https://rustup.rs)):
+
+```sh
+cargo install claude-codex --locked
+```
+
+**2. Sign in to your ChatGPT plan** through the Codex CLI:
+
+```sh
+codex login
+```
+
+Confirm it worked (prints your account and expiry):
+
+```sh
+claude-codex codex auth status
+```
+
+**3. Start the proxy** and leave it running (listens on `127.0.0.1:18765`):
+
+```sh
+claude-codex serve
+```
+
+To build from a specific commit instead: `cargo install --git https://github.com/fcakyon/claude-code-with-codex --locked`.
 
 Then, in a second terminal, point Claude Code at the proxy and launch it:
 
