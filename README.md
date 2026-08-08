@@ -32,9 +32,7 @@ your ChatGPT plan, in the same session, and flip between them whenever you want.
 
 ## Quickstart
 
-Three steps, each block is copy-paste ready.
-
-**1. Install `claude-codex`** (pick one).
+**1. Install `claude-codex`** using a prebuilt binary:
 
 Prebuilt binary, no Rust needed (macOS and Linux):
 
@@ -42,61 +40,54 @@ Prebuilt binary, no Rust needed (macOS and Linux):
 curl -fsSL https://raw.githubusercontent.com/fcakyon/claude-code-with-codex/main/scripts/install.sh | bash
 ```
 
-Or from crates.io, if you have Rust ([rustup.rs](https://rustup.rs)):
+Or install from crates.io if you have Rust:
 
 ```sh
 cargo install claude-codex --locked
 ```
 
-**2. Sign in to your ChatGPT plan** through the Codex CLI:
-
-```sh
-codex login
-```
-
-Confirm it worked (prints your account and expiry):
+**2. Check your Codex CLI login:**
 
 ```sh
 claude-codex codex auth status
 ```
 
-**3. Start the proxy** and leave it running (listens on `127.0.0.1:18765`):
+Run `codex login` first if no valid account is found.
+
+**3. Start the router** and leave it running:
 
 ```sh
 claude-codex serve
 ```
 
-To build from a specific commit instead: `cargo install --git https://github.com/fcakyon/claude-code-with-codex --locked`.
-
-Then, in a second terminal, point Claude Code at the proxy and launch it:
+**4. Launch Claude Code through the router** in another terminal:
 
 ```sh
-export ANTHROPIC_BASE_URL="http://localhost:18765"
-
-# Leave these unset. Claude Code forwards your Claude subscription login for
-# Claude models only when no token is set here. Setting one breaks that route.
-unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
-
-# The opus slot runs on your Claude plan, the sonnet slot on your ChatGPT plan.
-export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-8"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="gpt-5.6-terra"
-export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-
-claude
+env \
+  -u ANTHROPIC_AUTH_TOKEN \
+  -u ANTHROPIC_API_KEY \
+  ANTHROPIC_BASE_URL=http://localhost:18765 \
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  claude
 ```
 
-That is it. Inside Claude Code, pick **Opus** to run on your Claude plan and
-**Sonnet** to run on your ChatGPT plan.
+Switch models directly inside Claude Code:
 
-To make it permanent, put the `export` lines in your `~/.zshrc` or `~/.bashrc`.
+```text
+/model gpt-5.6-sol[1m]
+/model claude-opus-5
+```
+
+The `[1m]` suffix enables Claude Code's larger-context mode. The router removes
+the suffix before sending the model name to Codex.
 
 ## Switching models
 
-- **The `/model` picker.** Choosing Opus uses `ANTHROPIC_DEFAULT_OPUS_MODEL`
-  (your Claude plan) and choosing Sonnet uses `ANTHROPIC_DEFAULT_SONNET_MODEL`
-  (your ChatGPT plan). Switch as often as you like, even mid-conversation.
-- **A specific model for one run.** `claude --model gpt-5.6-terra` or
-  `claude --model claude-opus-4-8`.
+- **Inside Claude Code.** Run `/model gpt-5.6-sol[1m]` for Codex or
+  `/model claude-opus-5` for Claude. Switch as often as you like, even
+  mid-conversation.
+- **For one new session.** Run `claude --model gpt-5.6-sol[1m]` or
+  `claude --model claude-opus-5`.
 - **List what is available.** `claude-codex models`.
 
 Reasoning is carried across a switch. When you move a conversation from one plan
@@ -120,15 +111,16 @@ An unknown model name returns a clear 400 that lists the ids you can use.
 
 ## Configuration
 
-Set through environment variables when launching Claude Code.
+Only `ANTHROPIC_BASE_URL` is required when launching Claude Code. Exact model
+names work without remapping the Opus, Sonnet, or Haiku slots.
 
-| Variable                                   | What it does                                                                        |
-| ------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `ANTHROPIC_BASE_URL`                       | Point Claude Code at the proxy, e.g. `http://localhost:18765`.                      |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL`             | Model id for the Opus slot in the picker. Use a `claude-*` id for your Claude plan. |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL`           | Model id for the Sonnet slot. Use `gpt-5.6-terra` for your ChatGPT plan.            |
-| `ANTHROPIC_MODEL`                          | Force a single model for the whole session instead of using the picker.             |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Set to `1` to skip Claude Code's non-essential background calls.                    |
+| Variable                                   | What it does                                                     |
+| ------------------------------------------ | ---------------------------------------------------------------- |
+| `ANTHROPIC_BASE_URL`                       | Point Claude Code at the proxy, e.g. `http://localhost:18765`.   |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL`             | Optionally remap the Opus alias.                                 |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL`           | Optionally remap the Sonnet alias.                               |
+| `ANTHROPIC_MODEL`                          | Optionally force one model for the whole session.                |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Set to `1` to skip Claude Code's non-essential background calls. |
 
 Do not set `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`. Either one overrides
 the Claude subscription login and the Claude route returns 401.
@@ -136,9 +128,9 @@ the Claude subscription login and the Claude route returns 401.
 The proxy listens on `127.0.0.1:18765` by default. Change it with
 `PORT=11435 claude-codex serve`, and match `ANTHROPIC_BASE_URL`.
 
-Background requests Claude Code makes for its small, fast model use a Claude id
-by default, so they run on your Claude plan. Set `ANTHROPIC_DEFAULT_HAIKU_MODEL`
-to a `gpt-5.6-*` id if you would rather run them on your ChatGPT plan.
+Alias remapping is optional. For example,
+`ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra` makes `/model sonnet` use Codex,
+but `/model gpt-5.6-terra[1m]` works without it.
 
 ## Other backends
 
