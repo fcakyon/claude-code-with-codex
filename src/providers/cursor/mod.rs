@@ -19,7 +19,10 @@ use http::StatusCode;
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
 use crate::monitor::usage_from_anthropic_sse;
-use crate::provider::{CliHandlers, Provider, RequestContext};
+use crate::provider::{
+    CliHandlers, Generation, GenerationBody, Provider, ProviderError, ProviderErrorKind,
+    RequestContext,
+};
 use crate::providers::cursor::auth::{
     clear_cursor_auth, expired_auth_message, load_cursor_auth, missing_auth_message,
     run_cursor_login,
@@ -81,29 +84,28 @@ impl Provider for CursorProvider {
             );
         }
 
-        if let Some(ref session_id) = ctx.session_id {
-            if let Some(pending) = BridgeRegistry::pending_tool(session_id) {
-                if let Some(result) = find_tool_result(&body, pending.tool_use_id()) {
-                    let (_result_messages, sse_bytes) =
-                        resume_cursor_tool_bridge(session_id, &message_id, model, result, &pending);
-                    if let Some(monitor) = ctx.monitor.as_ref() {
-                        let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
-                        monitor.stream_progress(
-                            &ctx.req_id,
-                            sse_bytes.len() as u64,
-                            count_sse_events(&sse_bytes),
-                            input_tokens,
-                            output_tokens,
-                        );
-                    }
-                    let headers = [
-                        (http::header::CONTENT_TYPE, "text/event-stream"),
-                        (http::header::CACHE_CONTROL, "no-cache"),
-                        (http::header::CONNECTION, "keep-alive"),
-                    ];
-                    return (headers, sse_bytes).into_response();
-                }
+        if let Some(ref session_id) = ctx.session_id
+            && let Some(pending) = BridgeRegistry::pending_tool(session_id)
+            && let Some(result) = find_tool_result(&body, pending.tool_use_id())
+        {
+            let (_result_messages, sse_bytes) =
+                resume_cursor_tool_bridge(session_id, &message_id, model, result, &pending);
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
+                monitor.stream_progress(
+                    &ctx.req_id,
+                    sse_bytes.len() as u64,
+                    count_sse_events(&sse_bytes),
+                    input_tokens,
+                    output_tokens,
+                );
             }
+            let headers = [
+                (http::header::CONTENT_TYPE, "text/event-stream"),
+                (http::header::CACHE_CONTROL, "no-cache"),
+                (http::header::CONNECTION, "keep-alive"),
+            ];
+            return (headers, sse_bytes).into_response();
         }
 
         let auth = match load_cursor_auth() {
@@ -141,7 +143,7 @@ impl Provider for CursorProvider {
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.upstream_started(&ctx.req_id);
         }
-        let upstream = match client.run_agent(&token, &prompt, &model, &images).await {
+        let upstream = match client.run_agent(&token, &prompt, model, &images).await {
             Ok(r) => r,
             Err(e) => {
                 return map_cursor_error_to_response(&e);
@@ -235,6 +237,114 @@ impl Provider for CursorProvider {
         )
             .into_response()
     }
+
+    async fn generate_anthropic_stream(
+        &self,
+        mut body: MessagesRequest,
+        ctx: RequestContext,
+    ) -> Result<Generation, ProviderError> {
+        body.stream = true;
+        let requested = body.model.clone().unwrap_or_else(|| "cursor".to_string());
+        let resolved = resolve_cursor_model(&requested).map_err(|error| {
+            ProviderError::new(
+                StatusCode::BAD_REQUEST,
+                ProviderErrorKind::InvalidRequest,
+                format!("Model \"{requested}\" is not supported: {error}"),
+            )
+        })?;
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.model_resolved(&ctx.req_id, &resolved.model_id);
+        }
+        let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        if let Some(session_id) = ctx.session_id.as_deref()
+            && let Some(pending) = BridgeRegistry::pending_tool(session_id)
+            && let Some(result) = find_tool_result(&body, pending.tool_use_id())
+        {
+            let (_, bytes) =
+                resume_cursor_tool_bridge(session_id, &message_id, &requested, result, &pending);
+            return Ok(Generation {
+                body: GenerationBody::BufferedSse(bytes.into()),
+                resolved_model: resolved.model_id,
+            });
+        }
+        let auth = load_cursor_auth()
+            .map_err(|error| {
+                ProviderError::new(
+                    StatusCode::UNAUTHORIZED,
+                    ProviderErrorKind::Authentication,
+                    format!("Cursor auth failed: {error}"),
+                )
+            })?
+            .ok_or_else(|| {
+                ProviderError::new(
+                    StatusCode::UNAUTHORIZED,
+                    ProviderErrorKind::Authentication,
+                    missing_auth_message(),
+                )
+            })?;
+        if matches!(auth.expires, Some(expires) if expires <= now_ms() + 60_000) {
+            return Err(ProviderError::new(
+                StatusCode::UNAUTHORIZED,
+                ProviderErrorKind::Authentication,
+                expired_auth_message(&auth),
+            ));
+        }
+        let prompt = render_cursor_prompt(&body);
+        let images = request::cursor_selected_images(&body);
+        if let Some(traffic) = ctx.traffic.as_ref() {
+            traffic.write_json(
+                "020-upstream-request",
+                &serde_json::json!({
+                    "model": requested,
+                    "prompt": prompt,
+                    "image_count": images.len(),
+                }),
+            );
+        }
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.upstream_started(&ctx.req_id);
+        }
+        let upstream = CursorHttpClient::new()
+            .run_agent(&auth.access_token, &prompt, &requested, &images)
+            .await
+            .map_err(cursor_provider_error)?;
+        if let Some(traffic) = ctx.traffic.as_ref() {
+            traffic.write_bytes("032-upstream-response-body.bin", &upstream.body);
+        }
+        let bytes = if can_bridge_cursor_native_tools(&body, ctx.session_id.as_deref()) {
+            let events =
+                decode_upstream_response(&upstream.body).map_err(cursor_decode_provider_error)?;
+            let allowed = advertised_tool_names(&body);
+            start_cursor_tool_bridge(
+                &message_id,
+                &requested,
+                ctx.session_id.as_deref().expect("bridge session validated"),
+                &events,
+                allowed,
+                Box::new(|| uuid::Uuid::new_v4().simple().to_string()),
+            )
+            .0
+        } else {
+            sse::frame_cursor_stream(&upstream, &message_id, &requested)
+        };
+        if let Some(traffic) = ctx.traffic.as_ref() {
+            traffic.write_bytes("050-anthropic-intermediate.sse", &bytes);
+        }
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            let (input_tokens, output_tokens) = usage_from_anthropic_sse(&bytes);
+            monitor.stream_progress(
+                &ctx.req_id,
+                bytes.len() as u64,
+                count_sse_events(&bytes),
+                input_tokens,
+                output_tokens,
+            );
+        }
+        Ok(Generation {
+            body: GenerationBody::BufferedSse(bytes.into()),
+            resolved_model: resolved.model_id,
+        })
+    }
 }
 
 fn count_sse_events(bytes: &[u8]) -> u64 {
@@ -251,6 +361,28 @@ fn now_ms() -> u64 {
 // ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
+
+fn cursor_provider_error(err: client::CursorError) -> ProviderError {
+    let (status, kind) = match err.status {
+        401 | 403 => (StatusCode::UNAUTHORIZED, ProviderErrorKind::Authentication),
+        429 => (StatusCode::TOO_MANY_REQUESTS, ProviderErrorKind::RateLimit),
+        _ => (StatusCode::BAD_GATEWAY, ProviderErrorKind::Api),
+    };
+    let mut error = ProviderError::new(status, kind, err.detail.unwrap_or(err.message));
+    if err.status == 429 {
+        error.retry_after = Some(err.retry_after.unwrap_or_else(|| "5".to_string()));
+    }
+    error
+}
+
+fn cursor_decode_provider_error(err: CursorDecodeError) -> ProviderError {
+    let (status, kind) = match err.status() {
+        Some(401 | 403) => (StatusCode::UNAUTHORIZED, ProviderErrorKind::Authentication),
+        Some(429) => (StatusCode::TOO_MANY_REQUESTS, ProviderErrorKind::RateLimit),
+        _ => (StatusCode::BAD_GATEWAY, ProviderErrorKind::Api),
+    };
+    ProviderError::new(status, kind, format!("Response decoding error: {err}"))
+}
 
 fn map_cursor_error_to_response(err: &client::CursorError) -> Response {
     match err.status {

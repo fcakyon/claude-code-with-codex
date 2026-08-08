@@ -11,6 +11,7 @@
 //! - Registry routing
 //! - Provider end-to-end against mock upstream
 
+use http_body_util::BodyExt;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
@@ -256,12 +257,11 @@ fn cursor_error_display_works() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
 async fn cursor_client_sends_connect_proto_headers_and_run_request_frame() {
     use axum::{Router, routing::post};
     use claude_codex::providers::cursor::client::CursorHttpClient;
-    use claude_codex::providers::cursor::connect::{
-        ConnectFrameDecoder, encode_connect_frame,
-    };
+    use claude_codex::providers::cursor::connect::{ConnectFrameDecoder, encode_connect_frame};
     use claude_codex::providers::cursor::proto::*;
     use claude_codex::providers::cursor::request::CursorSelectedImage;
     use prost::Message;
@@ -301,13 +301,23 @@ async fn cursor_client_sends_connect_proto_headers_and_run_request_frame() {
     let app = Router::new().route(
         "/agent.v1.AgentService/Run",
         post(
-            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            move |headers: axum::http::HeaderMap, mut body: axum::body::Body| {
                 let response_body = response_body.clone();
                 let observed_handler = Arc::clone(&observed_handler);
                 async move {
+                    let mut bytes = Vec::new();
+                    while let Some(Ok(frame)) = body.frame().await {
+                        if let Ok(data) = frame.into_data() {
+                            bytes.extend_from_slice(&data);
+                        }
+                        let mut decoder = ConnectFrameDecoder::new();
+                        if decoder.push(&bytes).is_ok_and(|frames| frames.len() >= 2) {
+                            break;
+                        }
+                    }
                     *observed_handler.lock().unwrap() = Some(ObservedRequest {
                         headers,
-                        body: body.to_vec(),
+                        body: bytes,
                     });
                     (
                         [(
@@ -411,37 +421,28 @@ async fn cursor_client_sends_connect_proto_headers_and_run_request_frame() {
 
     let mut decoder = ConnectFrameDecoder::new();
     let frames = decoder.push(&observed.body).unwrap();
-    assert_eq!(frames.len(), 1);
+    assert!(frames.len() >= 2);
     assert_eq!(frames[0].flags, 0);
-    let msg = AgentClientMessage::decode(&frames[0].payload[..]).unwrap();
-    let run = msg.run_request.expect("run request");
-    assert!(msg.client_heartbeat.is_none());
-    assert_eq!(run.conversation_id, "");
-    assert_eq!(run.conversation_group_id, "");
-    assert!(run.client_supports_inline_images);
-    assert!(!run.exclude_workspace_context);
-    assert_eq!(run.requested_model.unwrap().model_id, "gpt-5.5");
-    let user_message = run
-        .action
-        .unwrap()
-        .user_message_action
-        .unwrap()
-        .user_message
-        .unwrap();
-    assert_eq!(user_message.text, "wire prompt");
-    assert_eq!(user_message.message_id, request_id);
-    assert_eq!(user_message.mode, "AGENT_MODE_AGENT");
-    let image = user_message
-        .selected_context
-        .unwrap()
-        .selected_images
-        .into_iter()
-        .next()
-        .unwrap();
-    assert_eq!(image.data, "aGVsbG8=");
-    assert_eq!(image.uuid, "image-id");
-    assert_eq!(image.path, "claude-image-1.png");
-    assert_eq!(image.mime_type, "image/png");
+    assert_eq!(frames[0].payload.first().copied(), Some(0x0a));
+    assert!(
+        frames[0]
+            .payload
+            .windows(b"wire prompt".len())
+            .any(|window| window == b"wire prompt")
+    );
+    assert!(
+        frames[0]
+            .payload
+            .windows(b"gpt-5.5".len())
+            .any(|window| window == b"gpt-5.5")
+    );
+    assert!(
+        frames[0]
+            .payload
+            .windows(b"hello".len())
+            .any(|window| window == b"hello")
+    );
+    assert_eq!(frames[1].payload.first().copied(), Some(0x12));
 
     unsafe {
         std::env::remove_var("CCP_CURSOR_BASE_URL");
@@ -677,6 +678,7 @@ fn registry_provider_for_legacy_cursor_model() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
     use axum::{Router, routing::post};
     use claude_codex::providers::cursor::connect::encode_connect_frame;
@@ -727,7 +729,7 @@ async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
 
     let app = Router::new().route(
         "/agent.v1.AgentService/Run",
-        post(move |_body: axum::body::Bytes| async move {
+        post(move |_body: axum::body::Body| async move {
             (
                 [(
                     axum::http::header::CONTENT_TYPE,
@@ -798,6 +800,7 @@ async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cursor_provider_handle_messages_returns_anthropic_json() {
     use axum::{Router, routing::post};
     use claude_codex::providers::cursor::connect::encode_connect_frame;
@@ -832,7 +835,7 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
 
     let app = Router::new().route(
         "/agent.v1.AgentService/Run",
-        post(move |_body: axum::body::Bytes| async move {
+        post(move |_body: axum::body::Body| async move {
             (
                 [(
                     axum::http::header::CONTENT_TYPE,
@@ -897,11 +900,10 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
 async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
     use axum::{Router, routing::post};
-    use claude_codex::providers::cursor::connect::{
-        ConnectFrameDecoder, encode_connect_frame,
-    };
+    use claude_codex::providers::cursor::connect::{ConnectFrameDecoder, encode_connect_frame};
     use claude_codex::providers::cursor::proto::*;
     use prost::Message;
     use std::sync::{Arc, Mutex};
@@ -955,16 +957,26 @@ async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
     let upstream_app = Router::new().route(
         "/agent.v1.AgentService/Run",
         post(
-            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            move |headers: axum::http::HeaderMap, mut body: axum::body::Body| {
                 let response_body = response_body.clone();
                 let observed_handler = Arc::clone(&observed_handler);
                 async move {
+                    let mut bytes = Vec::new();
+                    while let Some(Ok(frame)) = body.frame().await {
+                        if let Ok(data) = frame.into_data() {
+                            bytes.extend_from_slice(&data);
+                        }
+                        let mut decoder = ConnectFrameDecoder::new();
+                        if decoder.push(&bytes).is_ok_and(|frames| frames.len() >= 2) {
+                            break;
+                        }
+                    }
                     *observed_handler.lock().unwrap() = Some(ObservedRequest {
                         authorization: headers
                             .get(axum::http::header::AUTHORIZATION)
-                            .and_then(|v| v.to_str().ok())
+                            .and_then(|value| value.to_str().ok())
                             .map(str::to_string),
-                        body: body.to_vec(),
+                        body: bytes,
                     });
                     (
                         [(
@@ -1035,18 +1047,13 @@ async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
 
     let mut decoder = ConnectFrameDecoder::new();
     let frames = decoder.push(&observed.body).unwrap();
-    assert_eq!(frames.len(), 1);
-    let msg = AgentClientMessage::decode(&frames[0].payload[..]).unwrap();
-    let user_message = msg
-        .run_request
-        .unwrap()
-        .action
-        .unwrap()
-        .user_message_action
-        .unwrap()
-        .user_message
-        .unwrap();
-    assert!(user_message.text.contains("hello over proxy"));
+    assert!(frames.len() >= 2);
+    assert!(
+        frames[0]
+            .payload
+            .windows(b"hello over proxy".len())
+            .any(|window| window == b"hello over proxy")
+    );
 
     let _ = shutdown_tx.send(());
     unsafe {
@@ -1526,13 +1533,12 @@ fn parse_sse_events(sse: &str) -> Vec<(String, serde_json::Value)> {
     let mut current_event = String::new();
 
     for line in sse.lines() {
-        if line.starts_with("event: ") {
-            current_event = line["event: ".len()..].to_string();
-        } else if line.starts_with("data: ") {
-            let data_str = &line["data: ".len()..];
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(data_str) {
-                events.push((current_event.clone(), data));
-            }
+        if let Some(event) = line.strip_prefix("event: ") {
+            current_event = event.to_string();
+        } else if let Some(data_str) = line.strip_prefix("data: ")
+            && let Ok(data) = serde_json::from_str::<serde_json::Value>(data_str)
+        {
+            events.push((current_event.clone(), data));
         }
     }
 

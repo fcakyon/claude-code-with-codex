@@ -1,4 +1,193 @@
-# Changelog
+## v0.1.32 (2026-08-03)
+
+- Kimi subagents and multimodal messages with mixed text and images work instead
+  of failing with an invalid content-part error.
+  ([#98](https://github.com/raine/claude-code-proxy/issues/98),
+  [#99](https://github.com/raine/claude-code-proxy/pull/99))
+
+## v0.1.31 (2026-08-02)
+
+- OpenCode Go subscriptions can power Claude Code with supported OpenAI, Google,
+  and Anthropic models through the new OpenCode Go provider.
+- Codex HTTP responses stream as they arrive, remain active during quiet periods,
+  and recover safely from temporary failures before model output begins.
+  ([#51](https://github.com/raine/claude-code-proxy/pull/51))
+- OpenAI-compatible requests preserve the caller's parallel tool-call setting
+  across Codex, Kimi, and Grok routes.
+- Claude Code agents sharing a session keep independent Codex continuation state,
+  preventing one agent from consuming or replacing another agent's context.
+  ([#96](https://github.com/raine/claude-code-proxy/pull/96))
+- Overlapping Codex compaction requests preserve the correct conversation history
+  and summary. ([#94](https://github.com/raine/claude-code-proxy/pull/94))
+- Monitor session token totals remain accurate as older requests leave the recent
+  request list or receive stale usage updates.
+
+## v0.1.30 (2026-07-31)
+
+- OpenAI-compatible clients can use Kimi, Grok, Cursor, or Codex through the
+  optional `POST /v1/chat/completions` and `POST /v1/responses` endpoints, with
+  support for streaming, reasoning, function tools, usage, and provider routing.
+- Codex users can transcribe audio through the optional OpenAI-compatible
+  `POST /v1/audio/transcriptions` endpoint using the existing Codex sign-in.
+  Enable it with `codex.transcriptionsApi` or
+  `CCP_CODEX_TRANSCRIPTIONS_API=1`.
+- Codex token estimates accurately count CJK text, long identifiers, minified
+  code, and base64-like content, improving context and compaction decisions.
+  ([#90](https://github.com/raine/claude-code-proxy/pull/90))
+- Codex WebSocket sessions remain reliable under high concurrency instead of
+  failing with 403 upgrade rejections.
+  ([#87](https://github.com/raine/claude-code-proxy/issues/87),
+  [#88](https://github.com/raine/claude-code-proxy/pull/88))
+
+## v0.1.29 (2026-07-30)
+
+- Codex honors required, disabled, and single-tool choices from Claude Code, and
+  disables parallel tool calls when requested.
+  ([#89](https://github.com/raine/claude-code-proxy/pull/89))
+
+## v0.1.28 (2026-07-29)
+
+- OpenAI-compatible clients can generate and edit images with `gpt-image-2`
+  through optional Codex Images API routes using the existing ChatGPT sign-in.
+  ([#85](https://github.com/raine/claude-code-proxy/pull/85))
+- Codex streams show estimated input usage from the start and exact usage at
+  completion, keeping Claude Code's live token counters useful.
+  ([#86](https://github.com/raine/claude-code-proxy/pull/86))
+
+## v0.1.27 (2026-07-29)
+
+- Grok streams remain reliable during long responses, keepalive events, and
+  output-token truncation instead of failing after partial output.
+- Forced Codex web searches keep the selected model, so Luna searches no longer
+  switch to Sol, while preserving domain filters and search usage reporting.
+  ([#53](https://github.com/raine/claude-code-proxy/pull/53))
+- Codex WebSocket connections honor `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+  and `NO_PROXY`, restoring standard non-TUN HTTP proxy support.
+  ([#83](https://github.com/raine/claude-code-proxy/pull/83))
+
+## v0.1.26 (2026-07-28)
+
+- Standard OpenAI clients can use Codex through the optional
+  `POST /v1/chat/completions` endpoint, with streaming, reasoning effort, and
+  structured output support.
+- Cursor Agent works with current client versions and restores text, thinking,
+  usage, model mode, and fast-mode handling.
+- Claude Code's `claude-opus-5` model name routes correctly through Codex and
+  Kimi.
+- Claude Code's automatic security-review classifier can use a dedicated model
+  configured with `CCP_AUTO_REVIEW_MODEL` or `autoReviewModel`.
+  ([#72](https://github.com/raine/claude-code-proxy/pull/72))
+- Codex retries empty successful completions and returns a clear error if no
+  usable response arrives. ([#70](https://github.com/raine/claude-code-proxy/pull/70),
+  [#71](https://github.com/raine/claude-code-proxy/pull/71))
+- Grok handles images in user messages and tool results without failing requests.
+  Images are omitted by default, with opt-in vision through
+  `CCP_GROK_TOOL_IMAGE`. Traffic captures redact image payloads.
+  ([#69](https://github.com/raine/claude-code-proxy/pull/69))
+- Nix builds use vendored dependencies for reproducible sandboxed builds.
+  ([#80](https://github.com/raine/claude-code-proxy/pull/80))
+
+## v0.1.25 (2026-07-24)
+
+- Kimi users can select Kimi K3 with the `kimi-k3` or `k3` model name, including
+  its one-million-token context window and `max` reasoning effort.
+  ([#79](https://github.com/raine/claude-code-proxy/pull/79))
+- The monitor shows active native Codex compaction requests with a dedicated
+  `compacting` status.
+
+## v0.1.24 (2026-07-23)
+
+- Codex optionally preserves conversation continuity across Claude Code
+  compaction boundaries with native encrypted compaction artifacts. Enable it
+  with `codex.serverCompaction` or `CCP_CODEX_SERVER_COMPACTION`.
+- Native OpenAI Responses clients can use `POST /v1/responses` with existing
+  Codex authentication, including JSON responses, SSE streaming, and automatic
+  token refresh. Enable the endpoint with `codex.responsesApi` or
+  `CCP_CODEX_RESPONSES_API=1`; it is disabled by default.
+
+## v0.1.23 (2026-07-22)
+
+- Codex WebSocket streaming handles pooled connections and HTTP fallback more
+  reliably, preventing concurrent requests from blocking each other or sending
+  the same request twice.
+- Codex errors preserve upstream status codes and optional retry timing, with
+  clearer permission failures and safer WebSocket handshake diagnostics.
+- Codex streaming limits oversized events and error responses, preventing
+  malformed or stalled upstream responses from consuming unbounded memory.
+
+## v0.1.22 (2026-07-20)
+
+- Grok accepts request metadata and tool-result references sent by current Claude
+  Code versions while continuing to reject malformed and unknown fields.
+  ([#56](https://github.com/raine/claude-code-proxy/pull/56))
+- Gateway model discovery lists every configured provider model and Claude-style
+  alias through `GET /v1/models`, making supported aliases available in Claude
+  Code's model picker. ([#60](https://github.com/raine/claude-code-proxy/issues/60),
+  [#61](https://github.com/raine/claude-code-proxy/pull/61))
+- Codex preserves supported base64 images in tool results while keeping mixed
+  text, image, error, and fallback content in its original order.
+  ([#59](https://github.com/raine/claude-code-proxy/pull/59))
+- Codex requests continue after the included usage limit when account credits
+  remain available. ([#68](https://github.com/raine/claude-code-proxy/pull/68))
+- Codex compaction requests cap reasoning effort at `low` to reduce latency and
+  reasoning-token usage. `CCP_COMPACT_EFFORT` can choose a different cap or
+  disable the behavior. ([#67](https://github.com/raine/claude-code-proxy/pull/67))
+
+## v0.1.21 (2026-07-15)
+
+- The monitor shows session token activity trends at common terminal widths,
+  making throughput history visible without an extra-wide window.
+
+## v0.1.20 (2026-07-15)
+
+- The monitor reliably shows project names for Claude Code sessions and keeps
+  them visible as requests are sequenced.
+- Keyboard navigation scrolls session and recent-request tables to keep the
+  selected row visible.
+- Pressing `q` asks for confirmation before gracefully shutting down the proxy.
+- Compact monitor layouts show more project, provider, model, effort, and token
+  details without requiring a wider terminal.
+
+## v0.1.19 (2026-07-15)
+
+- The monitor shows project and session context at more terminal widths while
+  preserving key request details in narrower layouts.
+
+## v0.1.18 (2026-07-15)
+
+- Codex preserves encrypted reasoning across turns, improving continuity when
+  conversation history is replayed. ([#52](https://github.com/raine/claude-code-proxy/pull/52))
+- The new `demo` command opens the interactive monitor with simulated traffic,
+  without starting a proxy server or requiring provider credentials.
+- Session rows show project names and output-token activity over time, making
+  concurrent sessions and usage bursts easier to identify.
+- Monitor tables adapt more consistently across terminal sizes and keep important
+  request details readable in compact layouts.
+- The monitor stays visible during graceful shutdown and shows progress until the
+  proxy finishes draining connections.
+
+## v0.1.17 (2026-07-14)
+
+- The proxy can listen on a configurable IP address through `CCP_BIND_ADDRESS`
+  or `bindAddress`, enabling protected access from containers and remote hosts.
+  ([#48](https://github.com/raine/claude-code-proxy/pull/48))
+- Model names with context-window hints such as `[1m]` route correctly across
+  providers. ([#50](https://github.com/raine/claude-code-proxy/pull/50))
+- The monitor reports more accurate output rates by measuring generation time
+  and excluding requests without complete usage and timing data.
+
+## v0.1.16 (2026-07-13)
+
+- GPT-5.6 Luna requests work without a custom User-Agent instead of failing with
+  a model unavailable error.
+  ([#45](https://github.com/raine/claude-code-proxy/issues/45))
+- Canceled or replaced Codex prompts cannot interrupt later turns with stale
+  continuation state.
+- GPT-5.6 setup examples use a 272K compaction window to stay within the current
+  ChatGPT context limit.
+- Homebrew installations can run the proxy at login as a background service with
+  `brew services start claude-code-proxy`.
+  ([#44](https://github.com/raine/claude-code-proxy/pull/44))
 
 ## v0.2.0 (2026-07-13)
 

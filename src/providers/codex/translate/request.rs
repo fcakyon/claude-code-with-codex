@@ -1,22 +1,24 @@
 use std::collections::HashSet;
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::anthropic::schema::MessagesRequest;
 use crate::config;
 use crate::providers::translate_shared::{
-    ContentBlock, flatten_system_text, image_source_to_url, normalize_content, read_effort,
-    wrap_reasoning,
+    ContentBlock, flatten_system_text, image_source_to_url, normalize_content, parallel_tool_calls,
+    read_effort, wrap_reasoning,
 };
 
 use super::read_rewrite::{ReadOffsetRewrite, read_offset_rewrite};
+use super::reasoning_signature::decode_reasoning_signature;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
     None,
@@ -48,11 +50,17 @@ pub enum ServiceTier {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ResponsesToolChoice {
+#[serde(rename_all = "snake_case")]
+pub enum ResponsesToolChoiceMode {
     Auto,
     None,
     Required,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResponsesToolChoice {
+    Mode(ResponsesToolChoiceMode),
     Function {
         r#type: String,
         name: String,
@@ -151,7 +159,47 @@ pub enum ResponsesInputItem {
     FunctionCallOutput {
         #[serde(default)]
         call_id: String,
-        output: String,
+        output: ResponsesFunctionCallOutput,
+    },
+    #[serde(rename = "reasoning")]
+    Reasoning {
+        id: String,
+        summary: Vec<Value>,
+        encrypted_content: String,
+    },
+    #[serde(rename = "compaction")]
+    Compaction { encrypted_content: String },
+    #[serde(rename = "compaction_trigger")]
+    CompactionTrigger,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResponsesFunctionCallOutput {
+    Text(String),
+    ContentItems(Vec<ResponsesFunctionCallOutputContentPart>),
+}
+
+impl ResponsesFunctionCallOutput {
+    #[cfg(test)]
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::ContentItems(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponsesFunctionCallOutputContentPart {
+    InputText {
+        text: String,
+    },
+    InputImage {
+        image_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
 }
 
@@ -218,7 +266,7 @@ pub struct TranslateOptions {
 // Translation entry point
 // ---------------------------------------------------------------------------
 
-fn to_codex_effort(effort: Option<&str>) -> Option<Effort> {
+pub(crate) fn to_codex_effort(effort: Option<&str>) -> Option<Effort> {
     match effort {
         Some("max") => Some(Effort::Max),
         Some("xhigh") => Some(Effort::Xhigh),
@@ -233,7 +281,7 @@ fn resolve_effort(effort: Option<Effort>) -> Result<Option<Effort>, anyhow::Erro
     resolve_effort_override(effort, config::codex_effort().as_deref())
 }
 
-fn resolve_effort_override(
+pub(crate) fn resolve_effort_override(
     effort: Option<Effort>,
     override_effort: Option<&str>,
 ) -> Result<Option<Effort>, anyhow::Error> {
@@ -258,6 +306,63 @@ fn resolve_effort_override(
 
 fn reasoning_summary_requested(summary: Option<&str>) -> bool {
     !matches!(summary, Some("off" | "none"))
+}
+
+// ---------------------------------------------------------------------------
+// Compaction fast path
+// ---------------------------------------------------------------------------
+
+const COMPACT_SYSTEM_MARKER: &str =
+    "You are a helpful AI assistant tasked with summarizing conversations";
+const COMPACT_MESSAGE_PREFIX: &str = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.";
+const COMPACT_MESSAGE_TASK: &str =
+    "Your task is to create a detailed summary of the conversation so far";
+
+pub(crate) fn is_compact_request(instructions: Option<&str>) -> bool {
+    instructions.is_some_and(|text| text.contains(COMPACT_SYSTEM_MARKER))
+}
+
+pub(crate) fn is_compact_message_text(text: &str) -> bool {
+    text.contains(COMPACT_MESSAGE_PREFIX) && text.contains(COMPACT_MESSAGE_TASK)
+}
+
+fn is_compact_message_content(content: &Value) -> bool {
+    match content {
+        Value::String(text) => is_compact_message_text(text),
+        Value::Array(blocks) => blocks.iter().any(|block| {
+            block.get("type").and_then(Value::as_str) == Some("text")
+                && block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_compact_message_text)
+        }),
+        _ => false,
+    }
+}
+
+pub(crate) fn is_compact_messages_request(request: &MessagesRequest) -> bool {
+    is_compact_request(flatten_system_text(request.extra.get("system")).as_deref())
+        || request.messages.last().is_some_and(|message| {
+            message.role == "user" && is_compact_message_content(&message.content)
+        })
+}
+
+/// Reasoning-effort cap applied to compaction requests, or None when the
+/// fast path is disabled. Summarization is extraction, not problem solving:
+/// native Claude Code compacts without extended thinking, so burning
+/// medium/high reasoning on a 200k-token summary only adds latency. The cap
+/// never raises effort — a request already below it is left alone.
+fn compact_effort_cap() -> Option<Effort> {
+    compact_effort_cap_from(std::env::var("CCP_COMPACT_EFFORT").ok().as_deref())
+}
+
+fn compact_effort_cap_from(raw: Option<&str>) -> Option<Effort> {
+    match raw {
+        None | Some("") => Some(Effort::Low),
+        Some("off") => None,
+        Some("none") => Some(Effort::None),
+        Some(other) => to_codex_effort(Some(other)).or(Some(Effort::Low)),
+    }
 }
 
 const VALID_SERVICE_TIERS: &[&str] = &["fast", "priority", "flex"];
@@ -324,10 +429,37 @@ pub fn translate_request(
     req: &MessagesRequest,
     opts: TranslateOptions,
 ) -> Result<ResponsesRequest, anyhow::Error> {
+    translate_request_inner(req, opts, true)
+}
+
+pub fn translate_openai_compatible_request(
+    req: &MessagesRequest,
+    model: String,
+    session_id: Option<String>,
+) -> Result<ResponsesRequest, anyhow::Error> {
+    translate_request_inner(
+        req,
+        TranslateOptions {
+            session_id,
+            service_tier: None,
+            model,
+            use_responses_lite: false,
+        },
+        false,
+    )
+}
+
+fn translate_request_inner(
+    req: &MessagesRequest,
+    opts: TranslateOptions,
+    apply_codex_config: bool,
+) -> Result<ResponsesRequest, anyhow::Error> {
     let instructions = flatten_system_text(req.extra.get("system"));
+    let is_compact = is_compact_messages_request(req);
     let input = build_input(req);
     let tools = read_tools(req)?;
     let tool_choice = map_tool_choice(req)?;
+    let parallel_tool_calls = parallel_tool_calls(req).unwrap_or(true);
 
     let mut text = ResponsesText {
         verbosity: Some("low".to_string()),
@@ -344,7 +476,7 @@ pub fn translate_request(
         input,
         store: false,
         stream: true,
-        parallel_tool_calls: true,
+        parallel_tool_calls,
         tool_choice,
         text,
         tools: None,
@@ -405,7 +537,7 @@ pub fn translate_request(
                 .any(|tool| matches!(tool, ResponsesTool::WebSearch(_)))
         });
         if !has_web_search {
-            out.tool_choice = Some(ResponsesToolChoice::Auto);
+            out.tool_choice = Some(ResponsesToolChoice::Mode(ResponsesToolChoiceMode::Auto));
         }
     }
 
@@ -413,17 +545,31 @@ pub fn translate_request(
         out.prompt_cache_key = Some(sid);
     }
 
-    let service_tier = resolve_service_tier(opts.service_tier)?;
-    if let Some(ref tier) = service_tier {
-        out.service_tier = Some(tier.clone());
+    if apply_codex_config {
+        let service_tier = resolve_service_tier(opts.service_tier)?;
+        if let Some(ref tier) = service_tier {
+            out.service_tier = Some(tier.clone());
+        }
     }
 
     let effort = read_effort(req)?;
     let codex_effort = to_codex_effort(effort);
-    let resolved_effort = resolve_effort(codex_effort)?;
+    let mut resolved_effort = if apply_codex_config {
+        resolve_effort(codex_effort)?
+    } else {
+        codex_effort
+    };
+    if apply_codex_config
+        && is_compact
+        && let Some(cap) = compact_effort_cap()
+        && resolved_effort.as_ref().is_some_and(|e| *e > cap)
+    {
+        resolved_effort = Some(cap);
+    }
     if resolved_effort.is_some() || opts.use_responses_lite {
         let summary = if resolved_effort.is_some()
-            && reasoning_summary_requested(config::codex_reasoning_summary().as_deref())
+            && (!apply_codex_config
+                || reasoning_summary_requested(config::codex_reasoning_summary().as_deref()))
         {
             Some("auto".to_string())
         } else {
@@ -593,10 +739,10 @@ fn map_tool_choice(req: &MessagesRequest) -> Result<Option<ResponsesToolChoice>,
         Some(Value::Object(m)) => m,
         Some(Value::String(s)) => {
             return Ok(Some(match s.as_str() {
-                "auto" => ResponsesToolChoice::Auto,
-                "none" => ResponsesToolChoice::None,
-                "any" | "required" => ResponsesToolChoice::Required,
-                _ => ResponsesToolChoice::Auto,
+                "auto" => ResponsesToolChoice::Mode(ResponsesToolChoiceMode::Auto),
+                "none" => ResponsesToolChoice::Mode(ResponsesToolChoiceMode::None),
+                "any" | "required" => ResponsesToolChoice::Mode(ResponsesToolChoiceMode::Required),
+                _ => ResponsesToolChoice::Mode(ResponsesToolChoiceMode::Auto),
             }));
         }
         _ => return Ok(None),
@@ -607,9 +753,15 @@ fn map_tool_choice(req: &MessagesRequest) -> Result<Option<ResponsesToolChoice>,
         .and_then(|v| v.as_str())
         .unwrap_or("auto");
     match choice_type {
-        "auto" => Ok(Some(ResponsesToolChoice::Auto)),
-        "none" => Ok(Some(ResponsesToolChoice::None)),
-        "any" | "required" => Ok(Some(ResponsesToolChoice::Required)),
+        "auto" => Ok(Some(ResponsesToolChoice::Mode(
+            ResponsesToolChoiceMode::Auto,
+        ))),
+        "none" => Ok(Some(ResponsesToolChoice::Mode(
+            ResponsesToolChoiceMode::None,
+        ))),
+        "any" | "required" => Ok(Some(ResponsesToolChoice::Mode(
+            ResponsesToolChoiceMode::Required,
+        ))),
         "tool" => {
             let name = choice.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let tools = req.extra.get("tools").and_then(|v| v.as_array());
@@ -667,22 +819,25 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                                     content: std::mem::take(&mut parts),
                                 });
                             }
-                            let body = tool_result_to_string(content);
-                            let output = if is_error.unwrap_or(false) {
-                                format!("[tool execution error]\n{body}")
-                            } else {
-                                body
-                            };
-                            let output =
-                                maybe_append_rewritten_read_offset_note(output, tool_use_id);
-                            let output = maybe_append_read_offset_guidance(
-                                output,
+                            let mut rendered = render_tool_result(content);
+                            if is_error.unwrap_or(false) {
+                                rendered.prepend_text("[tool execution error]".to_string());
+                            }
+                            if let Some(note) =
+                                rewritten_read_offset_note(&rendered.joined_text(), tool_use_id)
+                            {
+                                rendered.push_text(format!("\n{note}"));
+                            }
+                            if should_append_read_offset_guidance(
+                                &rendered.joined_text(),
                                 read_tool_uses_with_offset.contains(tool_use_id),
                                 is_error.unwrap_or(false),
-                            );
+                            ) {
+                                rendered.push_text(format!("\n{}", read_offset_guidance()));
+                            }
                             out.push(ResponsesInputItem::FunctionCallOutput {
                                 call_id: tool_use_id.clone(),
-                                output,
+                                output: function_call_output(rendered),
                             });
                         }
                         _ => {}
@@ -730,15 +885,6 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                             text_parts
                                 .push(ResponsesContentPart::OutputText { text: text.clone() });
                         }
-                        // Preserve reasoning across an opus->codex switch. The Responses API
-                        // has no `thinking` container, so a replayed thinking block would be
-                        // dropped; carry it forward as tagged text instead (same marker the
-                        // anthropic passthrough uses in the other direction).
-                        ContentBlock::Thinking { thinking } if !thinking.is_empty() => {
-                            text_parts.push(ResponsesContentPart::OutputText {
-                                text: wrap_reasoning(thinking),
-                            });
-                        }
                         ContentBlock::ToolUse { id, name, input } => {
                             flush_text(&mut out, &mut text_parts);
                             if is_read_tool_use_with_offset(name, input) {
@@ -751,6 +897,25 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                                 name: name.clone(),
                                 arguments: args,
                             });
+                        }
+                        ContentBlock::Thinking {
+                            thinking,
+                            signature,
+                        } => {
+                            if let Some(replay) =
+                                signature.as_deref().and_then(decode_reasoning_signature)
+                            {
+                                flush_text(&mut out, &mut text_parts);
+                                out.push(ResponsesInputItem::Reasoning {
+                                    id: replay.id,
+                                    summary: Vec::new(),
+                                    encrypted_content: replay.encrypted_content,
+                                });
+                            } else if !thinking.is_empty() {
+                                text_parts.push(ResponsesContentPart::OutputText {
+                                    text: wrap_reasoning(thinking),
+                                });
+                            }
                         }
                         _ => {}
                     }
@@ -767,14 +932,13 @@ fn is_read_tool_use_with_offset(name: &str, input: &Value) -> bool {
     name == "Read" && input.get("offset").is_some()
 }
 
-fn maybe_append_rewritten_read_offset_note(output: String, tool_use_id: &str) -> String {
+fn rewritten_read_offset_note(output: &str, tool_use_id: &str) -> Option<String> {
     if output.contains("Proxy Read offset note:") {
-        return output;
+        return None;
     }
-    let Some(rewrite) = read_offset_rewrite(tool_use_id) else {
-        return output;
-    };
-    format!("{output}\n\n{}", read_offset_rewrite_note(&rewrite))
+    read_offset_rewrite(tool_use_id)
+        .as_ref()
+        .map(read_offset_rewrite_note)
 }
 
 fn read_offset_rewrite_note(rewrite: &ReadOffsetRewrite) -> String {
@@ -793,19 +957,15 @@ fn read_offset_rewrite_note(rewrite: &ReadOffsetRewrite) -> String {
     )
 }
 
-fn maybe_append_read_offset_guidance(
-    output: String,
+fn should_append_read_offset_guidance(
+    output: &str,
     read_call_had_offset: bool,
     is_error: bool,
-) -> String {
-    if !read_call_had_offset
-        || output.contains("Codex Read guidance:")
-        || !looks_like_read_offset_result(&output)
-        || (!is_error && !looks_like_read_offset_warning(&output))
-    {
-        return output;
-    }
-    format!("{output}\n\n{}", read_offset_guidance())
+) -> bool {
+    read_call_had_offset
+        && !output.contains("Codex Read guidance:")
+        && looks_like_read_offset_result(output)
+        && (is_error || looks_like_read_offset_warning(output))
 }
 
 fn looks_like_read_offset_result(output: &str) -> bool {
@@ -834,57 +994,138 @@ fn read_offset_guidance() -> &'static str {
 // Tool result rendering
 // ---------------------------------------------------------------------------
 
-fn tool_result_to_string(content: &Value) -> String {
-    match content {
-        Value::String(s) => s.clone(),
-        Value::Array(arr) => {
-            let mut parts = Vec::new();
-            for b in arr {
-                match b.get("type").and_then(|v| v.as_str()) {
-                    Some("text") => match b.get("text").and_then(|v| v.as_str()) {
-                        Some(text) => parts.push(text.to_string()),
-                        None => parts.push(unsupported_tool_result_block_to_string(b)),
-                    },
-                    Some("image") => {
-                        if let Some(source) = b.get("source").and_then(|v| v.as_object()) {
-                            match source.get("type").and_then(|v| v.as_str()) {
-                                Some("url")
-                                    if source.get("url").and_then(|v| v.as_str()).is_some() =>
-                                {
-                                    parts.push("[image omitted: url]".to_string());
-                                }
-                                Some("base64")
-                                    if source
-                                        .get("media_type")
-                                        .and_then(|v| v.as_str())
-                                        .is_some()
-                                        && source
-                                            .get("data")
-                                            .and_then(|v| v.as_str())
-                                            .is_some() =>
-                                {
-                                    let media_type = source
-                                        .get("media_type")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("image");
-                                    parts.push(format!("[image omitted: {media_type}]"));
-                                }
-                                _ => parts.push(unsupported_tool_result_block_to_string(b)),
-                            }
-                        } else {
-                            parts.push(unsupported_tool_result_block_to_string(b));
-                        }
-                    }
-                    Some(other) => {
-                        parts.push(format!("[unsupported content block omitted: {other}]"));
-                    }
-                    None => parts.push(unsupported_tool_result_block_to_string(b)),
+enum RenderedToolResultPart {
+    Text(String),
+    Image(String),
+}
+
+struct RenderedToolResult {
+    parts: Vec<RenderedToolResultPart>,
+}
+
+impl RenderedToolResult {
+    fn has_images(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|part| matches!(part, RenderedToolResultPart::Image(_)))
+    }
+
+    fn joined_text(&self) -> String {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                RenderedToolResultPart::Text(text) => Some(text.as_str()),
+                RenderedToolResultPart::Image(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn prepend_text(&mut self, text: String) {
+        self.parts.insert(0, RenderedToolResultPart::Text(text));
+    }
+
+    fn push_text(&mut self, text: String) {
+        self.parts.push(RenderedToolResultPart::Text(text));
+    }
+}
+
+fn render_tool_result(content: &Value) -> RenderedToolResult {
+    let parts = match content {
+        Value::String(text) => vec![RenderedToolResultPart::Text(text.clone())],
+        Value::Array(blocks) => blocks.iter().map(render_tool_result_block).collect(),
+        _ => Vec::new(),
+    };
+    RenderedToolResult { parts }
+}
+
+fn render_tool_result_block(block: &Value) -> RenderedToolResultPart {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| RenderedToolResultPart::Text(text.to_string()))
+            .unwrap_or_else(|| {
+                RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block))
+            }),
+        Some("image") => render_tool_result_image(block),
+        Some(other) => {
+            RenderedToolResultPart::Text(format!("[unsupported content block omitted: {other}]"))
+        }
+        None => RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block)),
+    }
+}
+
+fn render_tool_result_image(block: &Value) -> RenderedToolResultPart {
+    let Some(source) = block.get("source").and_then(Value::as_object) else {
+        return RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block));
+    };
+    match source.get("type").and_then(Value::as_str) {
+        Some("url") if source.get("url").and_then(Value::as_str).is_some() => {
+            RenderedToolResultPart::Text("[image omitted: url]".to_string())
+        }
+        Some("base64") => {
+            let media_type = source.get("media_type").and_then(Value::as_str);
+            let data = source.get("data").and_then(Value::as_str);
+            match media_type
+                .zip(data)
+                .and_then(|(media_type, data)| validated_image_data_url(media_type, data))
+            {
+                Some(image_url) => RenderedToolResultPart::Image(image_url),
+                None => {
+                    RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block))
                 }
             }
-            parts.join("\n")
         }
-        _ => String::new(),
+        _ => RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block)),
     }
+}
+
+fn validated_image_data_url(media_type: &str, data: &str) -> Option<String> {
+    if !matches!(
+        media_type,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    ) {
+        return None;
+    }
+
+    let compact: String = data
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    if compact.is_empty() {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&compact)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&compact))
+        .ok()?;
+    let canonical = base64::engine::general_purpose::STANDARD.encode(decoded);
+    Some(format!("data:{media_type};base64,{canonical}"))
+}
+
+fn function_call_output(rendered: RenderedToolResult) -> ResponsesFunctionCallOutput {
+    if !rendered.has_images() {
+        return ResponsesFunctionCallOutput::Text(rendered.joined_text());
+    }
+
+    ResponsesFunctionCallOutput::ContentItems(
+        rendered
+            .parts
+            .into_iter()
+            .map(|part| match part {
+                RenderedToolResultPart::Text(text) => {
+                    ResponsesFunctionCallOutputContentPart::InputText { text }
+                }
+                RenderedToolResultPart::Image(image_url) => {
+                    ResponsesFunctionCallOutputContentPart::InputImage {
+                        image_url,
+                        detail: None,
+                    }
+                }
+            })
+            .collect(),
+    )
 }
 
 fn unsupported_tool_result_block_to_string(block: &Value) -> String {
@@ -900,6 +1141,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
     fn opts() -> TranslateOptions {
         TranslateOptions {
             session_id: None,
@@ -907,6 +1150,95 @@ mod tests {
             model: "gpt-5.5".to_string(),
             use_responses_lite: false,
         }
+    }
+
+    #[test]
+    fn responses_tool_choice_modes_serialize_as_openai_strings() {
+        for (mode, expected) in [
+            (ResponsesToolChoiceMode::Auto, json!("auto")),
+            (ResponsesToolChoiceMode::None, json!("none")),
+            (ResponsesToolChoiceMode::Required, json!("required")),
+        ] {
+            assert_eq!(
+                serde_json::to_value(ResponsesToolChoice::Mode(mode)).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn translate_tool_choice_preserves_wire_and_parallel_semantics() {
+        for (tool_choice, expected_choice, expected_parallel) in [
+            (json!({"type":"auto"}), json!("auto"), true),
+            (
+                json!({"type":"auto","disable_parallel_tool_use":false}),
+                json!("auto"),
+                true,
+            ),
+            (json!({"type":"none"}), json!("none"), true),
+            (json!({"type":"any"}), json!("required"), true),
+            (
+                json!({"type":"any","disable_parallel_tool_use":true}),
+                json!("required"),
+                false,
+            ),
+            (
+                json!({
+                    "type":"tool",
+                    "name":"test",
+                    "disable_parallel_tool_use":true
+                }),
+                json!({"type":"function","name":"test"}),
+                false,
+            ),
+        ] {
+            let req: MessagesRequest = serde_json::from_value(json!({
+                "model": "gpt-5.5",
+                "messages": [{"role":"user", "content":"use the tool"}],
+                "tools": [{
+                    "name":"test",
+                    "input_schema":{"type":"object","properties":{}}
+                }],
+                "tool_choice": tool_choice
+            }))
+            .unwrap();
+            let wire = serde_json::to_value(translate_request(&req, opts()).unwrap()).unwrap();
+
+            assert_eq!(wire["tool_choice"], expected_choice);
+            assert_eq!(wire["parallel_tool_calls"], expected_parallel);
+        }
+    }
+
+    #[test]
+    fn responses_lite_keeps_parallel_tool_calls_disabled() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.6-luna",
+            "messages": [{"role":"user", "content":"use the tool"}],
+            "tools": [{
+                "name":"test",
+                "input_schema":{"type":"object","properties":{}}
+            }],
+            "tool_choice": {
+                "type":"any",
+                "disable_parallel_tool_use":false
+            }
+        }))
+        .unwrap();
+        let wire = serde_json::to_value(
+            translate_request(
+                &req,
+                TranslateOptions {
+                    model: "gpt-5.6-luna".to_string(),
+                    use_responses_lite: true,
+                    ..opts()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(wire["tool_choice"], json!("required"));
+        assert_eq!(wire["parallel_tool_calls"], false);
     }
 
     #[test]
@@ -1088,7 +1420,14 @@ mod tests {
         )
         .unwrap();
         assert!(out.tools.is_none());
-        assert!(matches!(out.tool_choice, Some(ResponsesToolChoice::Auto)));
+        assert!(matches!(
+            out.tool_choice,
+            Some(ResponsesToolChoice::Mode(ResponsesToolChoiceMode::Auto))
+        ));
+        assert_eq!(
+            serde_json::to_value(&out).unwrap()["tool_choice"],
+            json!("auto")
+        );
     }
 
     #[test]
@@ -1265,6 +1604,155 @@ mod tests {
     }
 
     #[test]
+    fn compact_request_detected_from_system_marker() {
+        assert!(is_compact_request(Some(
+            "You are a helpful AI assistant tasked with summarizing conversations."
+        )));
+        assert!(!is_compact_request(Some("You are Claude Code.")));
+        assert!(!is_compact_request(None));
+    }
+
+    #[test]
+    fn compact_request_detected_from_final_user_message() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.6-sol",
+            "messages": [
+                {"role": "user", "content": "prior turn"},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": "result"
+                        },
+                        {
+                            "type": "text",
+                            "text": concat!(
+                                "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n",
+                                "Your task is to create a detailed summary of the conversation so far, ",
+                                "paying close attention to the user's explicit requests."
+                            )
+                        }
+                    ]
+                }
+            ],
+            "system": "You are Claude Code."
+        }))
+        .unwrap();
+
+        assert!(is_compact_messages_request(&req));
+    }
+
+    #[test]
+    fn compact_message_markers_must_be_in_final_user_message() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.6-sol",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": concat!(
+                        "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n",
+                        "Your task is to create a detailed summary of the conversation so far."
+                    )
+                },
+                {"role": "user", "content": "continue normally"}
+            ],
+            "system": "You are Claude Code."
+        }))
+        .unwrap();
+
+        assert!(!is_compact_messages_request(&req));
+    }
+
+    #[test]
+    fn compact_message_requires_both_markers() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.6-sol",
+            "messages": [{
+                "role": "user",
+                "content": "Your task is to create a detailed summary of the conversation so far."
+            }],
+            "system": "You are Claude Code."
+        }))
+        .unwrap();
+
+        assert!(!is_compact_messages_request(&req));
+    }
+
+    #[test]
+    fn compact_effort_cap_parses_env_values() {
+        assert!(matches!(compact_effort_cap_from(None), Some(Effort::Low)));
+        assert!(matches!(
+            compact_effort_cap_from(Some("")),
+            Some(Effort::Low)
+        ));
+        assert!(compact_effort_cap_from(Some("off")).is_none());
+        assert!(matches!(
+            compact_effort_cap_from(Some("none")),
+            Some(Effort::None)
+        ));
+        assert!(matches!(
+            compact_effort_cap_from(Some("medium")),
+            Some(Effort::Medium)
+        ));
+        // Unrecognized values fall back to the safe default.
+        assert!(matches!(
+            compact_effort_cap_from(Some("bogus")),
+            Some(Effort::Low)
+        ));
+    }
+
+    #[test]
+    fn compact_request_downgrades_effort_to_cap() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content":"summarize"}],
+            "system": "You are a helpful AI assistant tasked with summarizing conversations.",
+            "output_config": {"effort": "medium"}
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        assert!(matches!(out.reasoning.unwrap().effort, Some(Effort::Low)));
+    }
+
+    #[test]
+    fn compact_cap_never_raises_effort() {
+        // A compact request already at or below the cap is left alone.
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content":"summarize"}],
+            "system": "You are a helpful AI assistant tasked with summarizing conversations.",
+            "output_config": {"effort": "low"}
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        assert!(matches!(out.reasoning.unwrap().effort, Some(Effort::Low)));
+    }
+
+    #[test]
+    fn non_compact_request_keeps_requested_effort() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content":"hello"}],
+            "system": "You are Claude Code.",
+            "output_config": {"effort": "high"}
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        assert!(matches!(out.reasoning.unwrap().effort, Some(Effort::High)));
+    }
+
+    #[test]
+    fn effort_ordering_matches_variant_order() {
+        assert!(Effort::None < Effort::Low);
+        assert!(Effort::Low < Effort::Medium);
+        assert!(Effort::Medium < Effort::High);
+        assert!(Effort::High < Effort::Xhigh);
+        assert!(Effort::Xhigh < Effort::Max);
+    }
+
+    #[test]
     fn max_tokens_is_not_serialized_for_codex() {
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "gpt-5.5",
@@ -1407,8 +1895,9 @@ mod tests {
         .unwrap();
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 1);
-        if let ResponsesInputItem::FunctionCallOutput { call_id, .. } = &out.input[0] {
+        if let ResponsesInputItem::FunctionCallOutput { call_id, output } = &out.input[0] {
             assert_eq!(call_id, "tu_1");
+            assert_eq!(output.as_text(), Some("result"));
         } else {
             panic!("expected FunctionCallOutput");
         }
@@ -1437,6 +1926,7 @@ mod tests {
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 2);
         if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
+            let output = output.as_text().expect("text tool output");
             assert!(output.contains("[tool execution error]"));
             assert!(output.contains("File has 331 lines"));
             assert!(output.contains("Codex Read guidance:"));
@@ -1469,7 +1959,10 @@ mod tests {
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 2);
         if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
-            assert_eq!(output, "[tool execution error]\nFile does not exist.");
+            assert_eq!(
+                output.as_text(),
+                Some("[tool execution error]\nFile does not exist.")
+            );
         } else {
             panic!("expected FunctionCallOutput");
         }
@@ -1502,6 +1995,7 @@ mod tests {
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 2);
         if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
+            let output = output.as_text().expect("text tool output");
             assert!(output.contains("1\tcontent"));
             assert!(output.contains("Proxy Read offset note:"));
             assert!(output.contains("1300000"));
@@ -1534,8 +2028,8 @@ mod tests {
         assert_eq!(out.input.len(), 2);
         if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
             assert_eq!(
-                output,
-                "File has 331 lines, and the requested offset is shown in this fixture."
+                output.as_text(),
+                Some("File has 331 lines, and the requested offset is shown in this fixture.")
             );
         } else {
             panic!("expected FunctionCallOutput");
@@ -1543,19 +2037,154 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_stringifies_images_and_malformed_blocks() {
-        let rendered = tool_result_to_string(&json!([
-            {"type": "text", "text": "caption"},
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
-            {"type": "image", "source": {"type": "url", "url": "https://example.invalid/a.png"}},
+    fn translate_tool_result_preserves_mixed_content_order() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "tu_image",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": PNG_BASE64
+                    }},
+                    {"type": "text", "text": "after"}
+                ]
+            }]}]
+        }))
+        .unwrap();
+
+        let out = translate_request(&req, opts()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&out.input[0]).unwrap(),
+            json!({
+                "type": "function_call_output",
+                "call_id": "tu_image",
+                "output": [
+                    {"type": "input_text", "text": "before"},
+                    {"type": "input_image", "image_url": format!("data:image/png;base64,{PNG_BASE64}")},
+                    {"type": "input_text", "text": "after"}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn translate_tool_result_preserves_image_then_text_order() {
+        let rendered = render_tool_result(&json!([
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": PNG_BASE64
+            }},
+            {"type": "text", "text": "caption"}
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(function_call_output(rendered)).unwrap(),
+            json!([
+                {"type": "input_image", "image_url": format!("data:image/png;base64,{PNG_BASE64}")},
+                {"type": "input_text", "text": "caption"}
+            ])
+        );
+    }
+
+    #[test]
+    fn unsupported_tool_result_images_become_in_place_text_placeholders() {
+        let rendered = render_tool_result(&json!([
+            {"type": "text", "text": "before"},
+            {"type": "image", "source": {
+                "type": "url",
+                "url": "https://example.invalid/a.png"
+            }},
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": "text/plain",
+                "data": "aGVsbG8="
+            }},
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "not base64"
+            }},
+            {"type": "text", "text": "after"}
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(function_call_output(rendered)).unwrap(),
+            json!(
+                "before\n[image omitted: url]\n[unsupported content block omitted: image]\n[unsupported content block omitted: image]\nafter"
+            )
+        );
+    }
+
+    #[test]
+    fn supported_tool_result_image_media_types_pass_validation() {
+        for media_type in ["image/jpeg", "image/png", "image/gif", "image/webp"] {
+            assert_eq!(
+                validated_image_data_url(media_type, "YQ"),
+                Some(format!("data:{media_type};base64,YQ=="))
+            );
+        }
+        assert!(validated_image_data_url("image/svg+xml", "YQ==").is_none());
+        assert!(validated_image_data_url("image/png", "").is_none());
+    }
+
+    #[test]
+    fn text_only_tool_result_keeps_string_wire_format() {
+        let rendered = render_tool_result(&json!([
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"}
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(function_call_output(rendered)).unwrap(),
+            json!("first\nsecond")
+        );
+    }
+
+    #[test]
+    fn tool_result_error_prefix_precedes_image_content() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "tu_error_image",
+                "is_error": true,
+                "content": [{"type": "image", "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": PNG_BASE64
+                }}]
+            }]}]
+        }))
+        .unwrap();
+
+        let out = translate_request(&req, opts()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&out.input[0]).unwrap()["output"],
+            json!([
+                {"type": "input_text", "text": "[tool execution error]"},
+                {"type": "input_image", "image_url": format!("data:image/png;base64,{PNG_BASE64}")}
+            ])
+        );
+    }
+
+    #[test]
+    fn malformed_tool_result_blocks_still_become_text_placeholders() {
+        let rendered = render_tool_result(&json!([
             {"type": "text"},
             {"type": "image"},
             {}
         ]));
+
         assert_eq!(
-            rendered,
-            "caption\n[image omitted: image/png]\n[image omitted: url]\n[unsupported content block omitted: text]\n[unsupported content block omitted: image]\n[unsupported content block omitted: unknown]"
+            rendered.joined_text(),
+            "[unsupported content block omitted: text]\n[unsupported content block omitted: image]\n[unsupported content block omitted: unknown]"
         );
+        assert!(!rendered.has_images());
     }
 
     #[test]
@@ -1708,5 +2337,48 @@ mod tests {
         ] {
             assert!(keys.contains(*key), "missing key: {key}");
         }
+    }
+
+    #[test]
+    fn assistant_thinking_signature_replays_codex_reasoning_item() {
+        let replay = super::super::reasoning_signature::ReasoningReplay {
+            id: "rs_1".to_string(),
+            encrypted_content: "opaque".to_string(),
+        };
+        let signature =
+            super::super::reasoning_signature::encode_reasoning_signature(&replay).unwrap();
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [
+                {"role":"user","content":"start"},
+                {"role":"assistant","content":[
+                    {"type":"thinking","thinking":"visible summary","signature":signature},
+                    {"type":"text","text":"done"}
+                ]},
+                {"role":"user","content":"continue"}
+            ]
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        let reasoning_index = out
+            .input
+            .iter()
+            .position(|item| matches!(item, ResponsesInputItem::Reasoning { .. }))
+            .unwrap();
+        let ResponsesInputItem::Reasoning {
+            id,
+            summary,
+            encrypted_content,
+        } = &out.input[reasoning_index]
+        else {
+            unreachable!();
+        };
+        assert_eq!(id, "rs_1");
+        assert!(summary.is_empty());
+        assert_eq!(encrypted_content, "opaque");
+        assert!(matches!(
+            out.input.get(reasoning_index + 1),
+            Some(ResponsesInputItem::Message { role, .. }) if role == "assistant"
+        ));
     }
 }

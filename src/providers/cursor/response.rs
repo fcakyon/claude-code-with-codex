@@ -64,17 +64,29 @@ pub fn decode_upstream_response(body: &[u8]) -> Result<Vec<CursorStreamEvent>, C
     for frame in &frames {
         if frame.flags & FLAG_END != 0 {
             // Check for Connect error in end frame
-            if !frame.payload.is_empty() {
-                if let Some(err) = parse_connect_error(&frame.payload) {
-                    return Err(CursorDecodeError::ConnectEnd(err));
-                }
+            if !frame.payload.is_empty()
+                && let Some(err) = parse_connect_error(&frame.payload)
+            {
+                return Err(CursorDecodeError::ConnectEnd(err));
             }
             events.push(CursorStreamEvent::End);
             continue;
         }
 
+        let decompressed;
+        let payload = if frame.flags & crate::providers::cursor::connect::FLAG_GZIP != 0 {
+            decompressed = crate::providers::cursor::connect::decode_gzip_frame(&frame.payload)
+                .map_err(|error| CursorDecodeError::Decode(format!("gzip decompress: {error}")))?;
+            &decompressed[..]
+        } else {
+            &frame.payload[..]
+        };
+        if events_from_current_payload(payload, &mut events) {
+            continue;
+        }
+
         let msg = match decode_frame_payload(frame) {
-            Ok(m) => m,
+            Ok(message) => message,
             Err(_) => continue,
         };
 
@@ -139,35 +151,161 @@ fn estimate_input_tokens(_content: &str) -> u64 {
     (_content.len() / 4) as u64
 }
 
+struct ProtoField<'a> {
+    number: u64,
+    wire_type: u8,
+    data: &'a [u8],
+    value: u64,
+}
+
+fn read_varint(bytes: &[u8]) -> Option<(u64, &[u8])> {
+    let mut value = 0u64;
+    let mut shift = 0;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, &bytes[index + 1..]));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
+}
+
+fn proto_fields(mut bytes: &[u8]) -> impl Iterator<Item = ProtoField<'_>> {
+    std::iter::from_fn(move || {
+        let (tag, rest) = read_varint(bytes)?;
+        bytes = rest;
+        let number = tag >> 3;
+        let wire_type = (tag & 7) as u8;
+        match wire_type {
+            0 => {
+                let (value, rest) = read_varint(bytes)?;
+                bytes = rest;
+                Some(ProtoField {
+                    number,
+                    wire_type,
+                    data: &[],
+                    value,
+                })
+            }
+            1 if bytes.len() >= 8 => {
+                bytes = &bytes[8..];
+                Some(ProtoField {
+                    number,
+                    wire_type,
+                    data: &[],
+                    value: 0,
+                })
+            }
+            2 => {
+                let (length, rest) = read_varint(bytes)?;
+                let length = usize::try_from(length).ok()?;
+                if rest.len() < length {
+                    return None;
+                }
+                let data = &rest[..length];
+                bytes = &rest[length..];
+                Some(ProtoField {
+                    number,
+                    wire_type,
+                    data,
+                    value: 0,
+                })
+            }
+            5 if bytes.len() >= 4 => {
+                bytes = &bytes[4..];
+                Some(ProtoField {
+                    number,
+                    wire_type,
+                    data: &[],
+                    value: 0,
+                })
+            }
+            _ => None,
+        }
+    })
+}
+
+fn nested_text(payload: &[u8], update_type: u64) -> Option<String> {
+    let interaction =
+        proto_fields(payload).find(|field| field.number == 1 && field.wire_type == 2)?;
+    let update = proto_fields(interaction.data)
+        .find(|field| field.number == update_type && field.wire_type == 2)?;
+    let text = proto_fields(update.data).find(|field| field.number == 1 && field.wire_type == 2)?;
+    let text = std::str::from_utf8(text.data).ok()?;
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn current_usage(payload: &[u8]) -> Option<(u64, u64, u64, u64)> {
+    let interaction =
+        proto_fields(payload).find(|field| field.number == 1 && field.wire_type == 2)?;
+    let ended =
+        proto_fields(interaction.data).find(|field| field.number == 14 && field.wire_type == 2)?;
+    let mut usage = [0; 4];
+    for field in proto_fields(ended.data) {
+        if field.wire_type == 0 && (1..=4).contains(&field.number) {
+            usage[field.number as usize - 1] = field.value;
+        }
+    }
+    Some((usage[0], usage[1], usage[2], usage[3]))
+}
+
+fn events_from_current_payload(payload: &[u8], events: &mut Vec<CursorStreamEvent>) -> bool {
+    let mut decoded = false;
+    if let Some(text) = nested_text(payload, 4) {
+        events.push(CursorStreamEvent::ThinkingDelta { text });
+        decoded = true;
+    }
+    if let Some(text) = nested_text(payload, 1) {
+        events.push(CursorStreamEvent::TextDelta { text });
+        decoded = true;
+    }
+    if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) =
+        current_usage(payload)
+    {
+        events.push(CursorStreamEvent::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        });
+        events.push(CursorStreamEvent::End);
+        decoded = true;
+    }
+    decoded
+}
+
 fn events_from_message(msg: &AgentServerMessage, events: &mut Vec<CursorStreamEvent>) {
     // Check for exec_server_message with session info
-    if let Some(ref exec) = msg.exec_server_message {
-        if let Some(ref session_id) = exec.notes_session_id {
-            if !session_id.is_empty() {
-                events.push(CursorStreamEvent::Session {
-                    session_id: session_id.clone(),
-                });
-            }
-        }
+    if let Some(ref exec) = msg.exec_server_message
+        && let Some(ref session_id) = exec.notes_session_id
+        && !session_id.is_empty()
+    {
+        events.push(CursorStreamEvent::Session {
+            session_id: session_id.clone(),
+        });
     }
 
     if let Some(ref update) = msg.interaction_update {
         // Thinking delta
-        if let Some(ref td) = update.thinking_delta {
-            if !td.text.is_empty() {
-                events.push(CursorStreamEvent::ThinkingDelta {
-                    text: td.text.clone(),
-                });
-            }
+        if let Some(ref td) = update.thinking_delta
+            && !td.text.is_empty()
+        {
+            events.push(CursorStreamEvent::ThinkingDelta {
+                text: td.text.clone(),
+            });
         }
 
         // Text delta
-        if let Some(ref td) = update.text_delta {
-            if !td.text.is_empty() {
-                events.push(CursorStreamEvent::TextDelta {
-                    text: td.text.clone(),
-                });
-            }
+        if let Some(ref td) = update.text_delta
+            && !td.text.is_empty()
+        {
+            events.push(CursorStreamEvent::TextDelta {
+                text: td.text.clone(),
+            });
         }
 
         // Turn ended (usage + end)

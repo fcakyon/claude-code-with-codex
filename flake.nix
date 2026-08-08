@@ -17,16 +17,13 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          default = pkgs.stdenv.mkDerivation {
+          default = pkgs.rustPlatform.buildRustPackage {
             pname = cargoToml.package.name;
             version = cargoToml.package.version;
 
             src = ./.;
 
-            nativeBuildInputs = with pkgs; [
-              cargo
-              rustc
-            ];
+            cargoLock.lockFile = ./Cargo.lock;
 
             buildPhase = ''
               runHook preBuild
@@ -43,7 +40,7 @@
 
             meta = with pkgs.lib; {
               description = cargoToml.package.description;
-              homepage = "https://github.com/raine/claude-code-proxy";
+              homepage = cargoToml.package.homepage;
               license = licenses.mit;
               mainProgram = "claude-codex";
             };

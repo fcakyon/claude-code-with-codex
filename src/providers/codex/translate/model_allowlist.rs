@@ -26,6 +26,7 @@ pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("opus", "gpt-5.6-sol"),
     ("claude-opus-4-7", "gpt-5.6-sol"),
     ("claude-opus-4-8", "gpt-5.6-sol"),
+    ("claude-opus-5", "gpt-5.6-sol"),
     ("fable", "gpt-5.6-sol"),
     ("claude-fable-5", "gpt-5.6-sol"),
 ];
@@ -57,6 +58,13 @@ fn resolve_fast_model_alias(model: &str) -> ResolvedModel {
 }
 
 pub fn resolve_model_request(model: &str) -> ResolvedModel {
+    resolve_model_request_with_config_override(model, true)
+}
+
+pub fn resolve_model_request_with_config_override(
+    model: &str,
+    apply_config_override: bool,
+) -> ResolvedModel {
     let alias = MODEL_ALIASES
         .iter()
         .find(|(alias, _)| *alias == model)
@@ -65,7 +73,7 @@ pub fn resolve_model_request(model: &str) -> ResolvedModel {
 
     let requested = resolve_fast_model_alias(alias);
 
-    let override_model = config::codex_model();
+    let override_model = apply_config_override.then(config::codex_model).flatten();
     let resolved = match override_model {
         Some(ref val) if !val.is_empty() => resolve_fast_model_alias(val),
         _ => requested.clone(),
@@ -172,9 +180,11 @@ mod tests {
     }
 
     #[test]
-    fn opus_4_8_resolves_to_sol() {
-        let r = resolve_model_request("claude-opus-4-8");
-        assert_eq!(r.model, "gpt-5.6-sol");
+    fn opus_aliases_resolve_to_sol() {
+        for model in ["claude-opus-4-8", "claude-opus-5"] {
+            let r = resolve_model_request(model);
+            assert_eq!(r.model, "gpt-5.6-sol");
+        }
     }
 
     #[test]

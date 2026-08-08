@@ -22,7 +22,10 @@ use crate::anthropic::{
     schema::{CountTokensResponse, MessagesRequest},
 };
 use crate::monitor::MonitorHandle;
-use crate::provider::{CliHandlers, Provider, RequestContext};
+use crate::provider::{
+    CliHandlers, Generation, GenerationBody, Provider, ProviderError, ProviderErrorKind,
+    RequestContext,
+};
 use crate::{registry::GROK_MODELS, traffic::StreamTrafficCapture};
 
 use self::auth::token_store::file_store;
@@ -38,6 +41,7 @@ pub struct GrokProvider {
 }
 impl GrokProvider {
     pub fn new() -> Self {
+        crate::config::warn_grok_tool_image_mode_once(&crate::logging::create_logger("grok"));
         Self {
             client: Arc::new(
                 client::GrokClient::new(
@@ -186,6 +190,51 @@ impl Provider for GrokProvider {
         )
             .into_response()
     }
+
+    async fn generate_anthropic_stream(
+        &self,
+        mut body: MessagesRequest,
+        ctx: RequestContext,
+    ) -> Result<Generation, ProviderError> {
+        body.stream = true;
+        let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
+        let resolved = resolve_model(&requested);
+        assert_allowed_model(&resolved).map_err(|error| {
+            ProviderError::new(
+                StatusCode::BAD_REQUEST,
+                ProviderErrorKind::InvalidRequest,
+                error.to_string(),
+            )
+        })?;
+        let translated = translate_request(&body, resolved.clone()).map_err(|error| {
+            ProviderError::new(
+                StatusCode::BAD_REQUEST,
+                ProviderErrorKind::InvalidRequest,
+                error.to_string(),
+            )
+        })?;
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.model_resolved(&ctx.req_id, &resolved);
+            monitor.upstream_started(&ctx.req_id);
+        }
+        let upstream = self
+            .client
+            .post(&translated, ctx.traffic.clone())
+            .await
+            .map_err(grok_provider_error)?;
+        let response = stream_response(
+            upstream,
+            format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            requested,
+            ctx.monitor.clone(),
+            ctx.req_id.clone(),
+            ctx.traffic.clone(),
+        );
+        Ok(Generation {
+            body: GenerationBody::LiveSse(response.into_body()),
+            resolved_model: resolved,
+        })
+    }
 }
 
 fn stream_response(
@@ -287,10 +336,15 @@ where
                     return None;
                 }
             };
+            if self.bytes == 0
+                && let Some(monitor) = self.monitor.as_ref()
+            {
+                monitor.generation_started(&self.req_id);
+            }
             self.bytes = self.bytes.saturating_add(chunk.len() as u64);
             self.chunks = self.chunks.saturating_add(1);
             if let Some(monitor) = self.monitor.as_ref() {
-                monitor.stream_progress(&self.req_id, self.bytes, self.chunks, None, None);
+                monitor.stream_progress(&self.req_id, chunk.len() as u64, 1, None, None);
             }
             let events = match self.decoder.push(&chunk) {
                 Ok(events) => events,
@@ -347,6 +401,13 @@ where
 
     fn fail_at(&mut self, stage: &str, kind: &str) -> Vec<u8> {
         self.error_sent = true;
+        let mut fields = serde_json::Map::new();
+        fields.insert("reqId".into(), serde_json::json!(self.req_id));
+        fields.insert("stage".into(), serde_json::json!(stage));
+        fields.insert("kind".into(), serde_json::json!(kind));
+        fields.insert("bytes".into(), serde_json::json!(self.bytes));
+        fields.insert("chunks".into(), serde_json::json!(self.chunks));
+        crate::logging::create_logger("grok").warn("grok_stream_failed", Some(fields));
         if let Some(capture) = self.stream_capture.as_mut() {
             capture.malformed(stage, kind);
             capture.downstream_event("error", serde_json::json!({"type":"error","error":{"type":"api_error","message":"Grok stream is invalid"}}));
@@ -426,6 +487,22 @@ fn write_error(traffic: Option<&crate::traffic::TrafficCapture>, stage: &str, ki
             &serde_json::json!({"stage":stage,"kind":kind}),
         );
     }
+}
+
+fn grok_provider_error(error: client::GrokError) -> ProviderError {
+    let kind = match error.status {
+        StatusCode::UNAUTHORIZED => ProviderErrorKind::Authentication,
+        StatusCode::TOO_MANY_REQUESTS => ProviderErrorKind::RateLimit,
+        StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN => ProviderErrorKind::Permission,
+        _ => ProviderErrorKind::Api,
+    };
+    let status = match kind {
+        ProviderErrorKind::Api => StatusCode::BAD_GATEWAY,
+        _ => error.status,
+    };
+    let mut mapped = ProviderError::new(status, kind, error.message);
+    mapped.retry_after = error.retry_after;
+    mapped
 }
 
 fn map_error(error: client::GrokError) -> Response {
@@ -619,6 +696,32 @@ mod tests {
                 .expect("downstream EOF waited for upstream EOF")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn data_less_upstream_frame_does_not_interrupt_stream() {
+        let upstream = futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"first\"}\n\n",
+            )),
+            Ok(Bytes::from_static(b": keepalive\n\n")),
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+            )),
+        ]);
+        let response = stream_body(
+            upstream,
+            "msg_1".into(),
+            "grok-4.5".into(),
+            None,
+            "req_1".into(),
+            None,
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("first"));
+        assert!(body.contains("event: message_stop"));
+        assert!(!body.contains("event: error"));
     }
 
     #[tokio::test]

@@ -23,14 +23,32 @@ impl CodexEventFailure {
     }
 }
 
+pub(crate) fn is_terminal_rate_limit_event(payload: &Value) -> bool {
+    payload.get("type").and_then(Value::as_str) == Some("codex.rate_limits")
+        && payload
+            .pointer("/rate_limits/limit_reached")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && payload
+            .pointer("/credits/has_credits")
+            .and_then(Value::as_bool)
+            != Some(true)
+        && payload
+            .pointer("/credits/unlimited")
+            .and_then(Value::as_bool)
+            != Some(true)
+}
+
+pub(crate) fn event_error(payload: &Value) -> Option<&Value> {
+    payload
+        .get("error")
+        .or_else(|| payload.pointer("/response/error"))
+}
+
 pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailure> {
     let event_type = payload.get("type").and_then(Value::as_str)?;
     if event_type == "codex.rate_limits" {
-        if payload
-            .pointer("/rate_limits/limit_reached")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
+        if !is_terminal_rate_limit_event(payload) {
             return None;
         }
         return Some(CodexEventFailure {
@@ -45,9 +63,7 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
         return None;
     }
 
-    let error = payload
-        .get("error")
-        .or_else(|| payload.pointer("/response/error"));
+    let error = event_error(payload);
     let explicit_status = numeric_status(payload)
         .or_else(|| {
             error
@@ -202,6 +218,61 @@ mod tests {
         .unwrap();
         assert_eq!(overload.status, 529);
         assert!(overload.retryable());
+    }
+
+    #[test]
+    fn terminal_rate_limit_honors_credits() {
+        // No credits field at all: legacy payload stays terminal.
+        assert!(is_terminal_rate_limit_event(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {"limit_reached": true}
+        })));
+
+        // Credits exhausted: terminal.
+        assert!(is_terminal_rate_limit_event(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {"limit_reached": true},
+            "credits": {"has_credits": false, "unlimited": false}
+        })));
+
+        // Usable credits remain: informational.
+        assert!(!is_terminal_rate_limit_event(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {"limit_reached": true},
+            "credits": {"has_credits": true, "unlimited": false}
+        })));
+
+        // Unlimited plan: informational.
+        assert!(!is_terminal_rate_limit_event(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {"limit_reached": true},
+            "credits": {"has_credits": false, "unlimited": true}
+        })));
+
+        // Limit not reached: never terminal, credits irrelevant.
+        assert!(!is_terminal_rate_limit_event(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {"limit_reached": false},
+            "credits": {"has_credits": false, "unlimited": false}
+        })));
+
+        // Wrong event type never matches.
+        assert!(!is_terminal_rate_limit_event(&serde_json::json!({
+            "type": "response.completed",
+            "rate_limits": {"limit_reached": true}
+        })));
+    }
+
+    #[test]
+    fn classifier_skips_credited_rate_limit_snapshots() {
+        assert!(
+            classify_event_failure(&serde_json::json!({
+                "type": "codex.rate_limits",
+                "rate_limits": {"limit_reached": true},
+                "credits": {"has_credits": true, "unlimited": false}
+            }))
+            .is_none()
+        );
     }
 
     #[test]

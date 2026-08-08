@@ -50,8 +50,10 @@ impl SseDecoder {
 
     fn end_line(&mut self, events: &mut Vec<SseEvent>) -> anyhow::Result<()> {
         if self.frame.len() == self.line_start {
-            if !self.frame.is_empty() {
-                events.push(parse_frame(&self.frame)?);
+            if !self.frame.is_empty()
+                && let Some(event) = parse_frame(&self.frame)?
+            {
+                events.push(event);
             }
             self.frame.clear();
             self.line_start = 0;
@@ -63,7 +65,7 @@ impl SseDecoder {
     }
 }
 
-fn parse_frame(frame: &[u8]) -> anyhow::Result<SseEvent> {
+fn parse_frame(frame: &[u8]) -> anyhow::Result<Option<SseEvent>> {
     let frame = std::str::from_utf8(frame)
         .map_err(|_| anyhow::anyhow!("Grok SSE frame contains invalid UTF-8"))?;
     let mut event = None;
@@ -81,12 +83,12 @@ fn parse_frame(frame: &[u8]) -> anyhow::Result<SseEvent> {
         }
     }
     if data.is_empty() {
-        anyhow::bail!("Grok SSE frame lacks data")
+        return Ok(None);
     }
-    Ok(SseEvent {
+    Ok(Some(SseEvent {
         event,
         data: data.join("\n"),
-    })
+    }))
 }
 
 pub struct StreamTranslator {
@@ -320,6 +322,22 @@ mod tests {
         let expected = vec![SseEvent {
             event: Some("ignored".into()),
             data: "first\nsecond".into(),
+        }];
+        for split in 0..=input.len() {
+            let mut decoder = SseDecoder::default();
+            let mut events = decoder.push(&input[..split]).unwrap();
+            events.extend(decoder.push(&input[split..]).unwrap());
+            decoder.finish().unwrap();
+            assert_eq!(events, expected);
+        }
+    }
+
+    #[test]
+    fn decoder_ignores_data_less_frames_at_every_boundary() {
+        let input = b": keepalive\n\nid: 42\n\nevent: ignored\n\nretry: 5000\n\ndata: complete\n\n";
+        let expected = vec![SseEvent {
+            event: None,
+            data: "complete".into(),
         }];
         for split in 0..=input.len() {
             let mut decoder = SseDecoder::default();

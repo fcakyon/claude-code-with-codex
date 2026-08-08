@@ -1,13 +1,4 @@
-/// Cursor model catalog -- resolves incoming model names to Cursor model IDs.
-///
-/// Resolution rules:
-/// - `cursor:`, `cursor-plan:`, `cursor-ask:` prefixes are stripped and mapped
-///   to the corresponding agent mode.
-/// - Legacy names like `cursor`, `cursor-agent`, `cursor-composer`,
-///   `cursor-composer-fast`, `cursor-plan`, `cursor-ask`, `composer-2.5`,
-///   `composer-2.5-fast` are recognized.
-/// - `cursor-agent:` is also supported for agent mode routing.
-
+/// Cursor model catalog resolves incoming model names to Cursor wire IDs.
 pub const CURSOR_LEGACY_MODELS: &[&str] = &[
     "cursor",
     "cursor-agent",
@@ -19,7 +10,6 @@ pub const CURSOR_LEGACY_MODELS: &[&str] = &[
     "composer-2.5-fast",
 ];
 
-/// Agent mode derived from model prefix or name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorAgentMode {
     Agent,
@@ -37,71 +27,62 @@ impl CursorAgentMode {
     }
 }
 
-/// Resolve a model string into a (model_id, mode) pair.
-///
-/// Returns an error if the model is not recognized.
+fn resolve_wire_model(raw: &str) -> (String, bool) {
+    raw.strip_suffix("-fast")
+        .map(|model| (model.to_string(), true))
+        .unwrap_or_else(|| (raw.to_string(), false))
+}
+
 pub fn resolve_cursor_model(model: &str) -> Result<CursorModelResolution, String> {
     let model = model.trim();
-
-    // Strip known prefixes
-    if let Some(rest) = model.strip_prefix("cursor-agent:") {
-        return Ok(CursorModelResolution {
-            model_id: rest.to_string(),
-            mode: CursorAgentMode::Agent,
-        });
-    }
-    if let Some(rest) = model.strip_prefix("cursor-plan:") {
-        return Ok(CursorModelResolution {
-            model_id: rest.to_string(),
-            mode: CursorAgentMode::Plan,
-        });
-    }
-    if let Some(rest) = model.strip_prefix("cursor-ask:") {
-        return Ok(CursorModelResolution {
-            model_id: rest.to_string(),
-            mode: CursorAgentMode::Ask,
-        });
-    }
-    if let Some(rest) = model.strip_prefix("cursor:") {
-        return Ok(CursorModelResolution {
-            model_id: rest.to_string(),
-            mode: CursorAgentMode::Agent,
-        });
-    }
-
-    // Legacy exact names
-    match model {
-        "cursor" | "cursor-agent" | "cursor-composer" | "cursor-composer-fast" => {
-            Ok(CursorModelResolution {
-                model_id: model.to_string(),
-                mode: CursorAgentMode::Agent,
-            })
+    for (prefix, mode) in [
+        ("cursor-agent:", CursorAgentMode::Agent),
+        ("cursor-plan:", CursorAgentMode::Plan),
+        ("cursor-ask:", CursorAgentMode::Ask),
+        ("cursor:", CursorAgentMode::Agent),
+    ] {
+        if let Some(raw) = model.strip_prefix(prefix) {
+            let (model_id, fast) = resolve_wire_model(raw);
+            return Ok(CursorModelResolution {
+                model_id,
+                mode,
+                fast,
+            });
         }
-        "cursor-plan" | "composer-2.5" => Ok(CursorModelResolution {
-            model_id: model.to_string(),
-            mode: CursorAgentMode::Plan,
-        }),
-        "cursor-ask" | "composer-2.5-fast" => Ok(CursorModelResolution {
-            model_id: model.to_string(),
-            mode: CursorAgentMode::Ask,
-        }),
-        _ => Err(format!(
-            "unknown cursor model: {model}. Supported: cursor:<id>, cursor-plan:<id>, cursor-ask:<id>, cursor-agent"
-        )),
     }
+
+    let (model_id, mode, fast) = match model {
+        "cursor" | "cursor-agent" => ("default", CursorAgentMode::Agent, false),
+        "cursor-plan" => ("default", CursorAgentMode::Plan, false),
+        "cursor-ask" => ("default", CursorAgentMode::Ask, false),
+        "cursor-composer" | "composer-2.5" => ("composer-2.5", CursorAgentMode::Agent, false),
+        "cursor-composer-fast" | "composer-2.5-fast" => {
+            ("composer-2.5", CursorAgentMode::Agent, true)
+        }
+        _ => {
+            return Err(format!(
+                "unknown cursor model: {model}. Supported: cursor:<id>, cursor-plan:<id>, cursor-ask:<id>, cursor-agent"
+            ));
+        }
+    };
+    Ok(CursorModelResolution {
+        model_id: model_id.to_string(),
+        mode,
+        fast,
+    })
 }
 
 #[derive(Debug, Clone)]
 pub struct CursorModelResolution {
     pub model_id: String,
     pub mode: CursorAgentMode,
+    pub fast: bool,
 }
 
-/// Build the list of supported Cursor model names.
 pub fn cursor_supported_models() -> Vec<String> {
     let mut out: Vec<String> = CURSOR_LEGACY_MODELS
         .iter()
-        .map(|s| (*s).to_string())
+        .map(|model| (*model).to_string())
         .collect();
     out.sort_unstable();
     out
@@ -113,77 +94,83 @@ mod tests {
 
     #[test]
     fn resolve_legacy_cursor() {
-        let r = resolve_cursor_model("cursor").unwrap();
-        assert_eq!(r.model_id, "cursor");
-        assert_eq!(r.mode, CursorAgentMode::Agent);
+        let resolution = resolve_cursor_model("cursor").unwrap();
+        assert_eq!(resolution.model_id, "default");
+        assert_eq!(resolution.mode, CursorAgentMode::Agent);
     }
 
     #[test]
     fn resolve_legacy_cursor_agent() {
-        let r = resolve_cursor_model("cursor-agent").unwrap();
-        assert_eq!(r.mode, CursorAgentMode::Agent);
+        let resolution = resolve_cursor_model("cursor-agent").unwrap();
+        assert_eq!(resolution.model_id, "default");
+        assert_eq!(resolution.mode, CursorAgentMode::Agent);
     }
 
     #[test]
     fn resolve_legacy_cursor_plan() {
-        let r = resolve_cursor_model("cursor-plan").unwrap();
-        assert_eq!(r.mode, CursorAgentMode::Plan);
+        let resolution = resolve_cursor_model("cursor-plan").unwrap();
+        assert_eq!(resolution.model_id, "default");
+        assert_eq!(resolution.mode, CursorAgentMode::Plan);
     }
 
     #[test]
     fn resolve_legacy_cursor_ask() {
-        let r = resolve_cursor_model("cursor-ask").unwrap();
-        assert_eq!(r.mode, CursorAgentMode::Ask);
+        let resolution = resolve_cursor_model("cursor-ask").unwrap();
+        assert_eq!(resolution.model_id, "default");
+        assert_eq!(resolution.mode, CursorAgentMode::Ask);
     }
 
     #[test]
     fn resolve_prefixed_cursor() {
-        let r = resolve_cursor_model("cursor:gpt-5.5").unwrap();
-        assert_eq!(r.model_id, "gpt-5.5");
-        assert_eq!(r.mode, CursorAgentMode::Agent);
+        let resolution = resolve_cursor_model("cursor:gpt-5.5").unwrap();
+        assert_eq!(resolution.model_id, "gpt-5.5");
+        assert_eq!(resolution.mode, CursorAgentMode::Agent);
     }
 
     #[test]
     fn resolve_prefixed_cursor_plan() {
-        let r = resolve_cursor_model("cursor-plan:gpt-5.5").unwrap();
-        assert_eq!(r.model_id, "gpt-5.5");
-        assert_eq!(r.mode, CursorAgentMode::Plan);
+        let resolution = resolve_cursor_model("cursor-plan:gpt-5.5").unwrap();
+        assert_eq!(resolution.model_id, "gpt-5.5");
+        assert_eq!(resolution.mode, CursorAgentMode::Plan);
     }
 
     #[test]
     fn resolve_prefixed_cursor_ask() {
-        let r = resolve_cursor_model("cursor-ask:gpt-5.5").unwrap();
-        assert_eq!(r.model_id, "gpt-5.5");
-        assert_eq!(r.mode, CursorAgentMode::Ask);
+        let resolution = resolve_cursor_model("cursor-ask:gpt-5.5").unwrap();
+        assert_eq!(resolution.model_id, "gpt-5.5");
+        assert_eq!(resolution.mode, CursorAgentMode::Ask);
     }
 
     #[test]
     fn resolve_prefixed_cursor_agent() {
-        let r = resolve_cursor_model("cursor-agent:gpt-5.5").unwrap();
-        assert_eq!(r.model_id, "gpt-5.5");
-        assert_eq!(r.mode, CursorAgentMode::Agent);
+        let resolution = resolve_cursor_model("cursor-agent:gpt-5.5").unwrap();
+        assert_eq!(resolution.model_id, "gpt-5.5");
+        assert_eq!(resolution.mode, CursorAgentMode::Agent);
     }
 
     #[test]
     fn resolve_unknown_model_errors() {
-        let r = resolve_cursor_model("unknown-model");
-        assert!(r.is_err());
+        assert!(resolve_cursor_model("unknown-model").is_err());
     }
 
     #[test]
     fn resolve_composer_models() {
-        let r = resolve_cursor_model("composer-2.5").unwrap();
-        assert_eq!(r.mode, CursorAgentMode::Plan);
+        let regular = resolve_cursor_model("composer-2.5").unwrap();
+        assert_eq!(regular.mode, CursorAgentMode::Agent);
+        assert_eq!(regular.model_id, "composer-2.5");
+        assert!(!regular.fast);
 
-        let r = resolve_cursor_model("composer-2.5-fast").unwrap();
-        assert_eq!(r.mode, CursorAgentMode::Ask);
+        let fast = resolve_cursor_model("composer-2.5-fast").unwrap();
+        assert_eq!(fast.mode, CursorAgentMode::Agent);
+        assert_eq!(fast.model_id, "composer-2.5");
+        assert!(fast.fast);
     }
 
     #[test]
     fn supported_models_includes_all_legacy() {
         let models = cursor_supported_models();
-        for m in CURSOR_LEGACY_MODELS {
-            assert!(models.contains(&m.to_string()), "missing {m}");
+        for model in CURSOR_LEGACY_MODELS {
+            assert!(models.contains(&model.to_string()), "missing {model}");
         }
     }
 }

@@ -2,7 +2,7 @@ use claude_codex::anthropic::{
     encode_sse_event, parse_sse_events, parse_sse_events_with_stats, schema::MessagesRequest,
 };
 use claude_codex::auth::{AuthStorage, InMemoryAuthStore};
-use claude_codex::config::{AliasProvider, load_config};
+use claude_codex::config::{AliasProvider, load_config_for_env};
 use claude_codex::logging::{create_logger, redact_value};
 use claude_codex::paths::{self, DirResolverEnv};
 use claude_codex::retry::{RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS, compute_backoff_delay};
@@ -227,42 +227,32 @@ async fn auth_store_read_write_and_logout() {
 
 #[test]
 fn config_env_precedence_and_defaults() {
-    let original = env::var("PORT").ok();
-    unsafe {
-        env::remove_var("PORT");
-    }
-    let cfg = load_config();
-    assert_eq!(cfg.port, 18765);
+    let config = TempDir::new().unwrap();
+    let mut env = HashMap::from([(
+        "CCP_CONFIG_DIR".to_string(),
+        config.path().to_string_lossy().into_owned(),
+    )]);
+    assert_eq!(load_config_for_env(&env).port, 18765);
 
-    unsafe {
-        env::set_var("PORT", "19999");
-    }
-    let cfg = load_config();
-    assert_eq!(cfg.port, 19999);
+    env.insert("PORT".to_string(), "19999".to_string());
+    assert_eq!(load_config_for_env(&env).port, 19999);
 
-    if let Some(v) = original {
-        unsafe {
-            env::set_var("PORT", v);
-        }
-    } else {
-        unsafe {
-            env::remove_var("PORT");
-        }
-    }
-
-    unsafe {
-        env::set_var("CCP_ALIAS_PROVIDER", "kimi");
-    }
-    assert!(matches!(load_config().alias_provider, AliasProvider::Kimi));
-    unsafe {
-        env::remove_var("CCP_ALIAS_PROVIDER");
-    }
+    env.insert("CCP_ALIAS_PROVIDER".to_string(), "kimi".to_string());
+    assert!(matches!(
+        load_config_for_env(&env).alias_provider,
+        AliasProvider::Kimi
+    ));
 }
 
 #[test]
 fn alias_provider_has_expected_default() {
+    let config = TempDir::new().unwrap();
+    let env = HashMap::from([(
+        "CCP_CONFIG_DIR".to_string(),
+        config.path().to_string_lossy().into_owned(),
+    )]);
     assert!(matches!(
-        load_config().alias_provider,
+        load_config_for_env(&env).alias_provider,
         AliasProvider::Anthropic
     ));
 }
