@@ -26,7 +26,7 @@ your ChatGPT plan, in the same session, and flip between them whenever you want.
 
 ## What you need
 
-- **Claude Code 2.1.226 or newer** installed and signed in with a **Claude Pro or Max** plan.
+- **Claude Code** installed and signed in with a **Claude Pro or Max** plan.
 - A **ChatGPT Plus, Pro, or Team** plan and the **Codex CLI** signed in.
 - **Rust** only if you install from crates.io or source. The prebuilt binary needs nothing.
 
@@ -54,24 +54,25 @@ claude-codex codex auth status
 
 Run `codex login` first if no valid account is found.
 
-**3. Start the router** and leave it running:
+**3. Point Claude Code at the router** in `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:18765"
+  }
+}
+```
+
+**4. Start the router** and leave it running:
 
 ```sh
 claude-codex serve
 ```
 
-**4. Launch Claude Code through the router** in another terminal:
+**5. Restart Claude Code.**
 
-```sh
-env \
-  -u ANTHROPIC_AUTH_TOKEN \
-  -u ANTHROPIC_API_KEY \
-  ANTHROPIC_BASE_URL=http://localhost:18765 \
-  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-  claude
-```
-
-Switch models directly inside Claude Code:
+Claude Code now discovers the models exposed by the router. Switch directly:
 
 ```text
 /model gpt-5.6-sol[1m]
@@ -84,10 +85,8 @@ the suffix before sending the model name to Codex.
 ## Switching models
 
 - **Inside Claude Code.** Run `/model gpt-5.6-sol[1m]` for Codex or
-  `/model claude-opus-5` for Claude. Switch as often as you like, even
-  mid-conversation.
-- **For one new session.** Run `claude --model gpt-5.6-sol[1m]` or
-  `claude --model claude-opus-5`.
+  `/model claude-opus-5` for Claude.
+- **For one new session.** Set `ANTHROPIC_MODEL` when launching Claude Code.
 - **List what is available.** `claude-codex models`.
 
 Reasoning is carried across a switch. When you move a conversation from one plan
@@ -111,8 +110,8 @@ An unknown model name returns a clear 400 that lists the ids you can use.
 
 ## Configuration
 
-Only `ANTHROPIC_BASE_URL` is required when launching Claude Code. Exact model
-names work without remapping the Opus, Sonnet, or Haiku slots.
+Only `ANTHROPIC_BASE_URL` is required in Claude Code's user settings. Restart
+Claude Code after changing it so `/model` discovers the router's model list.
 
 | Variable                                   | What it does                                                     |
 | ------------------------------------------ | ---------------------------------------------------------------- |
@@ -129,8 +128,7 @@ The proxy listens on `127.0.0.1:18765` by default. Change it with
 `PORT=11435 claude-codex serve`, and match `ANTHROPIC_BASE_URL`.
 
 Alias remapping is optional. For example,
-`ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra` makes `/model sonnet` use Codex,
-but `/model gpt-5.6-terra[1m]` works without it.
+`ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra` makes `/model sonnet` use Codex.
 
 ## Other backends
 
