@@ -33,6 +33,30 @@ fn models_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = Command::cargo_bin("claude-codex")?;
+    cmd.arg("--help");
+    let output = cmd.output()?;
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout)?;
+    for description in [
+        "Print version information",
+        "Start the proxy server and monitor",
+        "List supported provider models",
+        "Manage Codex authentication",
+        "Manage Kimi authentication",
+        "Manage Cursor authentication",
+        "Manage Grok authentication",
+    ] {
+        assert!(stdout.contains(description), "missing: {description}");
+    }
+    assert!(!stdout.contains("demo"));
+    assert!(!stdout.contains("mock data and no proxy server"));
+    Ok(())
+}
+
+#[test]
 fn invalid_command_exits_two() -> Result<(), Box<dyn std::error::Error>> {
     Command::cargo_bin("claude-codex")?
         .arg("definitely-not-a-command")

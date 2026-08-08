@@ -5,7 +5,8 @@ use tempfile::TempDir;
 const ACCESS_EXP_2100: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.sig"; // 2100-01-01
 const ACCESS_EXP_2000: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjk0NjY4NDgwMH0.sig"; // 2000-01-01
 // id_token carrying {"chatgpt_account_id":"acct_idtok"}.
-const ID_TOKEN_ACCT: &str = "eyJhbGciOiJub25lIn0.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0X2lkdG9rIn0.sig";
+const ID_TOKEN_ACCT: &str =
+    "eyJhbGciOiJub25lIn0.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0X2lkdG9rIn0.sig";
 
 /// Build a `codex auth status` command whose credential source is an isolated temp
 /// `auth.json` (via CCP_CODEX_AUTH_FILE, which takes precedence over $CODEX_HOME/$HOME).
@@ -20,7 +21,12 @@ fn codex_cmd() -> (Command, TempDir, std::path::PathBuf) {
 }
 
 /// Write a Codex-CLI-shaped auth.json. `id_token`/`account_id` are optional.
-fn write_auth(path: &std::path::Path, access: &str, account_id: Option<&str>, id_token: Option<&str>) {
+fn write_auth(
+    path: &std::path::Path,
+    access: &str,
+    account_id: Option<&str>,
+    id_token: Option<&str>,
+) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let account_field = account_id
         .map(|a| format!(r#","account_id":"{a}""#))

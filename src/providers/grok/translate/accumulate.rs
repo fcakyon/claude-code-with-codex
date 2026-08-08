@@ -209,4 +209,13 @@ mod tests {
         assert_eq!(response["content"][0]["input"]["value"], 1);
         assert_eq!(response["content"][1]["input"]["value"], 2);
     }
+
+    #[test]
+    fn accumulate_response_ignores_data_less_frames() {
+        let input = b": keepalive\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"complete\"}\n\nid: 42\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n";
+        let response = accumulate_response(input, "message", "grok-4.5").unwrap();
+
+        assert_eq!(response["content"][0]["text"], "complete");
+        assert_eq!(response["stop_reason"], "end_turn");
+    }
 }

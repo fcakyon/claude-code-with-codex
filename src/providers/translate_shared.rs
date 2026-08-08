@@ -36,6 +36,7 @@ pub enum ContentBlock {
     },
     Thinking {
         thinking: String,
+        signature: Option<String>,
     },
 }
 
@@ -68,6 +69,15 @@ pub fn flatten_system_text(system_val: Option<&Value>) -> Option<String> {
     } else {
         Some(texts.join("\n\n"))
     }
+}
+
+pub fn parallel_tool_calls(req: &MessagesRequest) -> Option<bool> {
+    req.extra
+        .get("tool_choice")
+        .and_then(Value::as_object)
+        .and_then(|choice| choice.get("disable_parallel_tool_use"))
+        .and_then(Value::as_bool)
+        .map(|disabled| !disabled)
 }
 
 pub fn read_effort(req: &MessagesRequest) -> Result<Option<&str>, anyhow::Error> {
@@ -216,7 +226,14 @@ fn parse_content_block(value: &Value, missing_tool_input: Value) -> Option<Conte
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            Some(ContentBlock::Thinking { thinking })
+            let signature = value
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+            })
         }
         _ => None,
     }

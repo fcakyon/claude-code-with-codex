@@ -48,7 +48,9 @@ fn decode_jwt_payload(token: &str) -> Option<Vec<u8>> {
         _ => payload_b64,
     };
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(&padded).ok()
+    base64::engine::general_purpose::STANDARD
+        .decode(&padded)
+        .ok()
 }
 
 fn parse_jwt_claims(token: &str) -> Option<IdTokenClaims> {

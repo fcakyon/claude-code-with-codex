@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
 use crate::anthropic::sse::encode_sse_event;
+use crate::providers::codex::events::is_terminal_rate_limit_event;
 use crate::traffic::TrafficCapture;
 
 use super::read_rewrite::sanitize_read_args;
+use super::reasoning_signature::{PendingReasoning, encode_reasoning_signature};
 use super::reducer::{
     CodexUsage, STOP_END_TURN, STOP_MAX_TOKENS, STOP_TOOL_USE, map_codex_usage_to_anthropic,
 };
@@ -41,6 +43,12 @@ struct LiveWebSearchResult {
     url: String,
 }
 
+#[derive(Clone, Copy)]
+struct LiveThinking {
+    output_index: usize,
+    anthropic_index: usize,
+}
+
 pub struct LiveStreamTranslator {
     message_id: String,
     model: String,
@@ -48,17 +56,30 @@ pub struct LiveStreamTranslator {
     blocks_by_output_index: HashMap<usize, LiveBlock>,
     item_id_to_output_index: HashMap<String, usize>,
     anthropic_index: usize,
-    thinking_index: Option<usize>,
+    thinking: Option<LiveThinking>,
+    reasoning_by_output_index: HashMap<usize, PendingReasoning>,
     saw_tool_use: bool,
     web_search_requests: usize,
     web_searches: Vec<LiveWebSearch>,
     web_search_results: Vec<LiveWebSearchResult>,
     deferred_text: Vec<(usize, String)>,
+    semantic_output_started: bool,
+    // Seeds Claude Code's live subagent counter until the provider returns
+    // authoritative usage in the terminal message_delta.
+    estimated_input_tokens: u64,
     finished: bool,
 }
 
 impl LiveStreamTranslator {
     pub fn new(message_id: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::with_estimated_input_tokens(message_id, model, 0)
+    }
+
+    pub fn with_estimated_input_tokens(
+        message_id: impl Into<String>,
+        model: impl Into<String>,
+        estimated_input_tokens: u64,
+    ) -> Self {
         Self {
             message_id: message_id.into(),
             model: model.into(),
@@ -66,12 +87,15 @@ impl LiveStreamTranslator {
             blocks_by_output_index: HashMap::new(),
             item_id_to_output_index: HashMap::new(),
             anthropic_index: 0,
-            thinking_index: None,
+            thinking: None,
+            reasoning_by_output_index: HashMap::new(),
             saw_tool_use: false,
             web_search_requests: 0,
             web_searches: Vec::new(),
             web_search_results: Vec::new(),
             deferred_text: Vec::new(),
+            semantic_output_started: false,
+            estimated_input_tokens,
             finished: false,
         }
     }
@@ -90,16 +114,14 @@ impl LiveStreamTranslator {
 
         match kind {
             "codex.rate_limits" => {
-                if payload
-                    .get("rate_limits")
-                    .and_then(|r| r.get("limit_reached"))
-                    .and_then(|v| v.as_bool())
-                    == Some(true)
-                {
+                if is_terminal_rate_limit_event(payload) {
                     return Err("rate limit reached".to_string());
                 }
+                self.emit_ping(traffic, &mut out);
             }
-            "keepalive" => {}
+            "keepalive" | "response.created" | "response.in_progress" => {
+                self.emit_ping(traffic, &mut out);
+            }
             "response.failed" | "response.error" | "error" => {
                 return Err(error_message(payload));
             }
@@ -110,14 +132,18 @@ impl LiveStreamTranslator {
                 self.output_item_added(payload, traffic, &mut out);
             }
             "response.reasoning_summary_part.added" => {
-                if let Some(index) = self.thinking_index {
+                let output_index = output_index(payload);
+                if let Some(thinking) = self
+                    .thinking
+                    .filter(|thinking| thinking.output_index == output_index)
+                {
                     self.emit(
                         traffic,
                         &mut out,
                         "content_block_delta",
                         &serde_json::json!({
                             "type": "content_block_delta",
-                            "index": index,
+                            "index": thinking.anthropic_index,
                             "delta": {"type": "thinking_delta", "thinking": "\n\n"}
                         }),
                     );
@@ -152,6 +178,18 @@ impl LiveStreamTranslator {
 
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    pub fn has_semantic_output(&self) -> bool {
+        self.semantic_output_started
+    }
+
+    pub fn ping_chunk(&mut self, traffic: Option<&TrafficCapture>) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.finished {
+            self.emit_ping(traffic, &mut out);
+        }
+        out
     }
 
     pub fn finish_after_closed_completed_tool_call(
@@ -216,12 +254,17 @@ impl LiveStreamTranslator {
                     "stop_reason": null,
                     "stop_sequence": null,
                     "usage": {
-                        "input_tokens": 0,
+                        "input_tokens": self.estimated_input_tokens,
                         "output_tokens": 0
                     }
                 }
             }),
         );
+    }
+
+    fn emit_ping(&mut self, traffic: Option<&TrafficCapture>, out: &mut Vec<u8>) {
+        self.ensure_message_start(traffic, out);
+        self.emit(traffic, out, "ping", &serde_json::json!({"type": "ping"}));
     }
 
     fn emit(
@@ -256,6 +299,12 @@ impl LiveStreamTranslator {
         let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         match item_type {
+            "reasoning" => {
+                self.reasoning_by_output_index
+                    .entry(output_index)
+                    .or_default()
+                    .capture(item);
+            }
             "message" => {
                 self.close_thinking(traffic, out);
                 let index = self.anthropic_index;
@@ -290,6 +339,7 @@ impl LiveStreamTranslator {
             "function_call" => {
                 self.close_thinking(traffic, out);
                 self.saw_tool_use = true;
+                self.semantic_output_started = true;
                 let index = self.anthropic_index;
                 self.anthropic_index += 1;
                 let call_id = item
@@ -344,14 +394,20 @@ impl LiveStreamTranslator {
         traffic: Option<&TrafficCapture>,
         out: &mut Vec<u8>,
     ) {
+        let output_index = output_index(payload);
         let delta = payload.get("delta").and_then(|v| v.as_str()).unwrap_or("");
         if delta.is_empty() {
             return;
         }
-        if self.thinking_index.is_none() {
+        self.semantic_output_started = true;
+        if self.thinking.map(|thinking| thinking.output_index) != Some(output_index) {
+            self.close_thinking(traffic, out);
             let index = self.anthropic_index;
             self.anthropic_index += 1;
-            self.thinking_index = Some(index);
+            self.thinking = Some(LiveThinking {
+                output_index,
+                anthropic_index: index,
+            });
             self.ensure_message_start(traffic, out);
             self.emit(
                 traffic,
@@ -364,7 +420,10 @@ impl LiveStreamTranslator {
                 }),
             );
         }
-        let index = self.thinking_index.unwrap();
+        let index = self
+            .thinking
+            .expect("thinking block was started")
+            .anthropic_index;
         self.emit(
             traffic,
             out,
@@ -388,6 +447,7 @@ impl LiveStreamTranslator {
         if delta.is_empty() {
             return;
         }
+        self.semantic_output_started = true;
 
         let output_index = payload
             .get("output_index")
@@ -575,13 +635,24 @@ impl LiveStreamTranslator {
         out: &mut Vec<u8>,
     ) {
         let output_index = output_index(payload);
-        if payload
+        if let Some(item) = payload
             .get("item")
             .and_then(|item| item.get("type"))
             .and_then(|v| v.as_str())
-            == Some("reasoning")
+            .filter(|item_type| *item_type == "reasoning")
+            .and_then(|_| payload.get("item"))
         {
+            self.reasoning_by_output_index
+                .entry(output_index)
+                .or_default()
+                .capture(item);
+            let had_active_summary = self
+                .thinking
+                .is_some_and(|thinking| thinking.output_index == output_index);
             self.close_thinking(traffic, out);
+            if !had_active_summary {
+                self.emit_signature_only_reasoning(output_index, traffic, out);
+            }
             return;
         }
 
@@ -592,6 +663,7 @@ impl LiveStreamTranslator {
             == Some("web_search_call")
         {
             self.close_thinking(traffic, out);
+            self.semantic_output_started = true;
             let item = &payload["item"];
             let index = self.anthropic_index;
             self.anthropic_index += 1;
@@ -896,10 +968,46 @@ impl LiveStreamTranslator {
         }
     }
 
-    fn close_thinking(&mut self, traffic: Option<&TrafficCapture>, out: &mut Vec<u8>) {
-        let Some(index) = self.thinking_index.take() else {
+    fn emit_signature_only_reasoning(
+        &mut self,
+        output_index: usize,
+        traffic: Option<&TrafficCapture>,
+        out: &mut Vec<u8>,
+    ) {
+        let Some(replay) = self
+            .reasoning_by_output_index
+            .remove(&output_index)
+            .and_then(|pending| pending.replay())
+        else {
             return;
         };
+        let Some(signature) = encode_reasoning_signature(&replay) else {
+            return;
+        };
+        self.semantic_output_started = true;
+        let index = self.anthropic_index;
+        self.anthropic_index += 1;
+        self.ensure_message_start(traffic, out);
+        self.emit(
+            traffic,
+            out,
+            "content_block_start",
+            &serde_json::json!({
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""}
+            }),
+        );
+        self.emit(
+            traffic,
+            out,
+            "content_block_delta",
+            &serde_json::json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "signature_delta", "signature": signature}
+            }),
+        );
         self.emit(
             traffic,
             out,
@@ -907,6 +1015,38 @@ impl LiveStreamTranslator {
             &serde_json::json!({
                 "type": "content_block_stop",
                 "index": index,
+            }),
+        );
+    }
+
+    fn close_thinking(&mut self, traffic: Option<&TrafficCapture>, out: &mut Vec<u8>) {
+        let Some(thinking) = self.thinking.take() else {
+            return;
+        };
+        if let Some(signature) = self
+            .reasoning_by_output_index
+            .remove(&thinking.output_index)
+            .and_then(|pending| pending.replay())
+            .and_then(|replay| encode_reasoning_signature(&replay))
+        {
+            self.emit(
+                traffic,
+                out,
+                "content_block_delta",
+                &serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": thinking.anthropic_index,
+                    "delta": {"type": "signature_delta", "signature": signature}
+                }),
+            );
+        }
+        self.emit(
+            traffic,
+            out,
+            "content_block_stop",
+            &serde_json::json!({
+                "type": "content_block_stop",
+                "index": thinking.anthropic_index,
             }),
         );
     }
@@ -1057,6 +1197,7 @@ fn error_message(payload: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anthropic::sse::parse_sse_events;
     use serde_json::json;
 
     fn render(events: Vec<serde_json::Value>) -> String {
@@ -1087,6 +1228,58 @@ mod tests {
         assert!(out.contains("text_delta"));
         assert!(out.contains("hello"));
         assert!(!out.contains("message_stop"));
+        assert!(translator.has_semantic_output());
+    }
+
+    #[test]
+    fn estimated_input_is_visible_at_start_and_provider_usage_is_exact_at_finish() {
+        let mut translator =
+            LiveStreamTranslator::with_estimated_input_tokens("msg_1", "gpt-5.5", 321);
+
+        let started = translator
+            .accept(
+                &json!({
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "delta": "abcdefgh"
+                }),
+                None,
+            )
+            .unwrap();
+        let started = parse_sse_events(&started)
+            .into_iter()
+            .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+            .find(|value| {
+                value.get("type").and_then(serde_json::Value::as_str) == Some("message_start")
+            })
+            .unwrap();
+        assert_eq!(
+            started.pointer("/message/usage/input_tokens"),
+            Some(&json!(321))
+        );
+
+        let finished = translator
+            .accept(
+                &json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_1",
+                        "status": "completed",
+                        "usage": {"input_tokens": 300, "output_tokens": 9}
+                    }
+                }),
+                None,
+            )
+            .unwrap();
+        let finished = parse_sse_events(&finished)
+            .into_iter()
+            .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+            .find(|value| {
+                value.get("type").and_then(serde_json::Value::as_str) == Some("message_delta")
+            })
+            .unwrap();
+        assert_eq!(finished.pointer("/usage/input_tokens"), Some(&json!(300)));
+        assert_eq!(finished.pointer("/usage/output_tokens"), Some(&json!(9)));
     }
 
     #[test]
@@ -1119,13 +1312,77 @@ mod tests {
     }
 
     #[test]
-    fn completed_response_with_null_incomplete_details_is_end_turn() {
-        let out = render(vec![json!({
-            "type": "response.completed",
-            "response": {"id": "resp_1", "status": "completed", "incomplete_details": null, "usage": {}}
-        })]);
+    fn terminal_only_completion_remains_non_semantic() {
+        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let out = translator
+            .accept(
+                &json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_1", "status": "completed", "incomplete_details": null, "usage": {}}
+                }),
+                None,
+            )
+            .unwrap();
+        let out = String::from_utf8(out).unwrap();
         assert!(out.contains(r#""stop_reason":"end_turn""#));
         assert!(!out.contains(r#""stop_reason":"max_tokens""#));
+        assert!(!translator.has_semantic_output());
+    }
+
+    #[test]
+    fn tool_thinking_and_web_search_events_are_semantic() {
+        let mut tool = LiveStreamTranslator::new("msg_tool", "gpt-5.5");
+        tool.accept(
+            &json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_1", "name": "Read"}
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(tool.has_semantic_output());
+
+        let mut thinking = LiveStreamTranslator::new("msg_thinking", "gpt-5.5");
+        thinking
+            .accept(
+                &json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "output_index": 0,
+                    "delta": "plan"
+                }),
+                None,
+            )
+            .unwrap();
+        assert!(thinking.has_semantic_output());
+
+        let mut web_search = LiveStreamTranslator::new("msg_search", "gpt-5.5");
+        web_search
+            .accept(
+                &json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"type": "web_search_call", "id": "ws_1"}
+                }),
+                None,
+            )
+            .unwrap();
+        assert!(!web_search.has_semantic_output());
+        web_search
+            .accept(
+                &json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "ws_1",
+                        "action": {"query": "claude-code-proxy"}
+                    }
+                }),
+                None,
+            )
+            .unwrap();
+        assert!(web_search.has_semantic_output());
     }
 
     #[test]
@@ -1301,5 +1558,80 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, "rate limit reached");
+    }
+
+    #[test]
+    fn progress_events_start_message_and_emit_pings() {
+        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let first = String::from_utf8(
+            translator
+                .accept(&json!({"type": "response.created"}), None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first.matches("event: message_start").count(), 1);
+        assert_eq!(first.matches("event: ping").count(), 1);
+
+        let second = String::from_utf8(translator.ping_chunk(None)).unwrap();
+        assert!(!second.contains("event: message_start"));
+        assert_eq!(second.matches("event: ping").count(), 1);
+    }
+
+    #[test]
+    fn live_stream_emits_signature_delta_before_thinking_stop() {
+        let out = render(vec![
+            json!({
+                "type":"response.output_item.added",
+                "output_index":0,
+                "item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"}
+            }),
+            json!({
+                "type":"response.reasoning_summary_text.delta",
+                "output_index":0,
+                "delta":"plan"
+            }),
+            json!({
+                "type":"response.output_item.done",
+                "output_index":0,
+                "item":{"type":"reasoning","id":"rs_1"}
+            }),
+            json!({
+                "type":"response.completed",
+                "response":{"id":"resp_1","usage":{}}
+            }),
+        ]);
+        let thinking_delta = out.find(r#""type":"thinking_delta""#).unwrap();
+        let signature_delta = out.find(r#""type":"signature_delta""#).unwrap();
+        let thinking_stop = out[signature_delta..]
+            .find("event: content_block_stop")
+            .map(|offset| signature_delta + offset)
+            .unwrap();
+        assert!(thinking_delta < signature_delta);
+        assert!(signature_delta < thinking_stop);
+        assert!(out.contains("ccp:codex:v1:"));
+    }
+
+    #[test]
+    fn signature_only_reasoning_is_semantic_output() {
+        let mut translator = LiveStreamTranslator::new("msg_1", "gpt-5.5");
+        let mut out = Vec::new();
+        for event in [
+            json!({
+                "type":"response.output_item.added",
+                "output_index":0,
+                "item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"}
+            }),
+            json!({
+                "type":"response.output_item.done",
+                "output_index":0,
+                "item":{"type":"reasoning","id":"rs_1"}
+            }),
+        ] {
+            out.extend(translator.accept(&event, None).unwrap());
+        }
+
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains(r#""type":"signature_delta""#));
+        assert!(translator.has_semantic_output());
     }
 }

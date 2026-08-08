@@ -6,7 +6,7 @@ use claude_codex::{
     paths,
     registry::{ANTHROPIC_STYLE_ALIASES, Registry},
     server::{self, ServerConfig},
-    tui::{self, MonitorUiConfig},
+    tui::{self, MonitorExit, MonitorUiConfig},
 };
 use std::io::IsTerminal;
 
@@ -29,29 +29,39 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Print version information
     Version,
+    /// Start the proxy server and monitor
     Serve {
         #[arg(long)]
         port: Option<u16>,
         #[arg(long = "no-monitor", action = ArgAction::SetTrue)]
         no_monitor: bool,
     },
+    /// Open the monitor TUI with mock data and no proxy server
+    #[command(hide = true)]
+    Demo,
+    /// List supported provider models
     Models {
         #[arg(long)]
         full: bool,
     },
+    /// Manage Codex authentication
     Codex {
         #[command(subcommand)]
         command: ProviderGroup,
     },
+    /// Manage Kimi authentication
     Kimi {
         #[command(subcommand)]
         command: ProviderGroup,
     },
+    /// Manage Cursor authentication
     Cursor {
         #[command(subcommand)]
         command: ProviderGroup,
     },
+    /// Manage Grok authentication
     Grok {
         #[command(subcommand)]
         command: ProviderGroup,
@@ -85,6 +95,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Serve { port, no_monitor } => {
+            let bind_address = config::bind_address();
             let effective_port = port.unwrap_or_else(config::port);
             let registry = Registry::with_default_alias();
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -92,9 +103,10 @@ fn main() -> Result<()> {
                 .build()?;
             match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
                 ServeMode::Plain => {
-                    print_server_banner(effective_port, &registry);
+                    print_server_banner(&bind_address, effective_port, &registry);
                     runtime
                         .block_on(server::serve(ServerConfig {
+                            bind_address,
                             port: effective_port,
                             monitor: None,
                         }))
@@ -104,28 +116,46 @@ fn main() -> Result<()> {
                     let _stderr_guard = logging::suppress_stderr();
                     let monitor = MonitorHandle::default();
                     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-                    let listener = runtime.block_on(server::bind_proxy_listener(effective_port))?;
+                    let (shutdown_complete_tx, shutdown_complete_rx) = std::sync::mpsc::channel();
+                    let listener = runtime
+                        .block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
+                    let local_addr = listener.local_addr()?;
+                    let monitor_listen_url =
+                        listen_url(&local_addr.ip().to_string(), local_addr.port());
                     let server_monitor = monitor.clone();
-                    let server_task = runtime.spawn(server::serve_listener(
-                        listener,
-                        Some(server_monitor),
-                        async move {
-                            let _ = shutdown_rx.await;
-                        },
-                    ));
+                    let server_task = runtime.spawn(async move {
+                        let result =
+                            server::serve_listener(listener, Some(server_monitor), async move {
+                                let _ = shutdown_rx.await;
+                            })
+                            .await;
+                        let _ = shutdown_complete_tx.send(());
+                        result
+                    });
                     let ui_result = tui::run_monitor(
                         monitor,
                         MonitorUiConfig {
+                            listen_url: monitor_listen_url,
                             port: effective_port,
                             registry: &registry,
                             shutdown: Some(shutdown_tx),
+                            shutdown_complete: Some(shutdown_complete_rx),
                         },
                     );
+                    if matches!(&ui_result, Ok(MonitorExit::ForceQuit)) {
+                        server_task.abort();
+                        let _ = runtime.block_on(server_task);
+                        std::process::exit(130);
+                    }
                     let server_result = runtime.block_on(server_task)?;
                     ui_result?;
                     server_result.map_err(|err| anyhow::anyhow!(err))
                 }
             }
+        }
+        Commands::Demo => {
+            let registry = Registry::with_default_alias();
+            tui::run_mock_monitor(config::port(), &registry)
         }
         Commands::Models { full } => {
             print_models(&Registry::with_default_alias(), full);
@@ -226,8 +256,15 @@ fn compact_cursor_list(models: &[String]) -> String {
     out
 }
 
-fn print_server_banner(port: u16, registry: &Registry) {
-    println!("Proxy listening on http://127.0.0.1:{port}");
+fn listen_url(bind_address: &str, port: u16) -> String {
+    match bind_address.parse::<std::net::IpAddr>() {
+        Ok(ip) => format!("http://{}", std::net::SocketAddr::new(ip, port)),
+        Err(_) => format!("http://{bind_address}:{port}"),
+    }
+}
+
+fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
+    println!("Proxy listening on {}", listen_url(bind_address, port));
     println!("Logs: {}", paths::log_file().display());
     let cfg = paths::config_dir();
     if cfg.exists() {
@@ -241,7 +278,9 @@ fn print_server_banner(port: u16, registry: &Registry) {
     println!("  # forwards your Claude subscription login for claude-* models, and any");
     println!("  # token set here overrides it and breaks the Claude route (401).");
     println!("  export ANTHROPIC_DEFAULT_OPUS_MODEL=\"claude-opus-4-8\"   # opus slot -> Claude");
-    println!("  export ANTHROPIC_DEFAULT_SONNET_MODEL=\"gpt-5.6-terra\"  # sonnet slot -> a backend above");
+    println!(
+        "  export ANTHROPIC_DEFAULT_SONNET_MODEL=\"gpt-5.6-terra\"  # sonnet slot -> a backend above"
+    );
     println!("  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1");
 }
 
@@ -267,5 +306,17 @@ mod tests {
     #[test]
     fn non_tty_stdout_selects_plain_mode() {
         assert_eq!(select_serve_mode(false, false), ServeMode::Plain);
+    }
+
+    #[test]
+    fn demo_command_parses_without_server_options() {
+        let cli = Cli::try_parse_from(["claude-codex", "demo"]).unwrap();
+
+        assert!(matches!(cli.command, Some(Commands::Demo)));
+    }
+
+    #[test]
+    fn listen_url_brackets_ipv6_addresses() {
+        assert_eq!(listen_url("::1", 18765), "http://[::1]:18765");
     }
 }

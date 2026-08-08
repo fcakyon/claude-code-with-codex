@@ -60,7 +60,7 @@ impl Reducer {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("event lacks type"))?;
         match typ {
-            "response.created" | "response.in_progress" => Ok(vec![]),
+            "response.created" | "response.in_progress" | "response.doom_loop_check" => Ok(vec![]),
             "response.reasoning_summary_part.added"
             | "response.reasoning_summary_part.done"
             | "response.content_part.added" => Ok(vec![]),
@@ -332,7 +332,7 @@ impl Reducer {
                     _ => Ok(vec![]),
                 }
             }
-            "response.completed" => {
+            "response.completed" | "response.incomplete" => {
                 if !self.calls.is_empty() {
                     anyhow::bail!("function call is incomplete");
                 }
@@ -347,7 +347,9 @@ impl Reducer {
                     .get("output_tokens")
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
-                let stop = if self.saw_tool {
+                let stop = if typ == "response.incomplete" {
+                    "max_tokens"
+                } else if self.saw_tool {
                     "tool_use"
                 } else {
                     "end_turn"
@@ -489,6 +491,26 @@ mod tests {
         let input = b"data: {\"type\":\"response.reasoning_summary_part.added\"}\n\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"think\"}\n\ndata: {\"type\":\"response.reasoning_summary_text.done\"}\n\ndata: {\"type\":\"response.reasoning_summary_part.done\",\"part\":{\"type\":\"summary_text\",\"text\":\"think\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\ndata: {\"type\":\"response.output_text.done\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n";
         let events = reduce_upstream_bytes(input).unwrap();
         assert!(matches!(events.last(), Some(ReducerEvent::Finish { .. })));
+    }
+
+    #[test]
+    fn grok_reducer_ignores_doom_loop_check_and_accepts_incomplete() {
+        let input = b"data: {\"type\":\"response.doom_loop_check\",\"doom_loop_check\":{\"triggers\":[]}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":2},\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n";
+        let events = reduce_upstream_bytes(input).unwrap();
+        assert!(
+            events.iter().any(
+                |event| matches!(event, ReducerEvent::TextDelta(_, delta) if delta == "partial")
+            )
+        );
+        assert!(matches!(
+            events.last(),
+            Some(ReducerEvent::Finish {
+                stop_reason,
+                input_tokens: 4,
+                output_tokens: 2,
+                ..
+            }) if stop_reason == "max_tokens"
+        ));
     }
 
     #[test]

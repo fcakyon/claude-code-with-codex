@@ -136,7 +136,8 @@ fn detect_hosted_web_search_regression(obj: &serde_json::Map<String, Value>, req
 fn is_stripped_request_header(name: &str) -> bool {
     matches!(
         name,
-        "host" | "connection"
+        "host"
+            | "connection"
             | "keep-alive"
             | "proxy-authenticate"
             | "proxy-authorization"
@@ -290,10 +291,14 @@ pub static ANTHROPIC_CLI: AnthropicCli = AnthropicCli;
 
 impl CliHandlers for AnthropicCli {
     fn login(&self) -> anyhow::Result<()> {
-        anyhow::bail!("The Claude backend reuses Claude Code's own login; no separate authentication is required")
+        anyhow::bail!(
+            "The Claude backend reuses Claude Code's own login; no separate authentication is required"
+        )
     }
     fn device(&self) -> anyhow::Result<()> {
-        anyhow::bail!("The Claude backend reuses Claude Code's own login; no separate authentication is required")
+        anyhow::bail!(
+            "The Claude backend reuses Claude Code's own login; no separate authentication is required"
+        )
     }
     fn status(&self) -> anyhow::Result<()> {
         println!("Claude backend: transparent passthrough to api.anthropic.com");
@@ -332,7 +337,9 @@ mod tests {
         // rate-limit and request-id headers must reach Claude Code
         assert!(!is_stripped_response_header("content-type"));
         assert!(!is_stripped_response_header("request-id"));
-        assert!(!is_stripped_response_header("anthropic-ratelimit-requests-remaining"));
+        assert!(!is_stripped_response_header(
+            "anthropic-ratelimit-requests-remaining"
+        ));
     }
 
     #[test]
@@ -423,7 +430,10 @@ mod tests {
         let raw = serde_json::to_vec(&body).unwrap();
         let a = sanitize_anthropic_request(&raw, "r").unwrap();
         let b = sanitize_anthropic_request(&raw, "r").unwrap();
-        assert_eq!(a, b, "rewrite must be byte-stable to preserve the cache prefix");
+        assert_eq!(
+            a, b,
+            "rewrite must be byte-stable to preserve the cache prefix"
+        );
     }
 
     #[test]

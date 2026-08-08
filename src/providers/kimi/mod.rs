@@ -12,7 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
 use crate::monitor::usage_from_anthropic_sse;
-use crate::provider::{CliHandlers, Provider, RequestContext};
+use crate::provider::{
+    CliHandlers, Generation, GenerationBody, Provider, ProviderError, ProviderErrorKind,
+    RequestContext,
+};
 use crate::providers::kimi::auth::token_store::file_store;
 use crate::providers::kimi::translate::accumulate::accumulate_response;
 use crate::providers::kimi::translate::model_allowlist::{assert_allowed_model, resolve_model};
@@ -185,10 +188,115 @@ impl Provider for KimiProvider {
         )
             .into_response()
     }
+
+    async fn generate_anthropic_stream(
+        &self,
+        mut body: MessagesRequest,
+        ctx: RequestContext,
+    ) -> Result<Generation, ProviderError> {
+        body.stream = true;
+        let requested = body
+            .model
+            .clone()
+            .unwrap_or_else(|| "kimi-for-coding".to_string());
+        let resolved = resolve_model(&requested);
+        assert_allowed_model(&resolved).map_err(|error| {
+            ProviderError::new(
+                StatusCode::BAD_REQUEST,
+                ProviderErrorKind::InvalidRequest,
+                format!(
+                    "Model \"{requested}\" resolves to unsupported model \"{}\"",
+                    error.model
+                ),
+            )
+        })?;
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.model_resolved(&ctx.req_id, &resolved);
+        }
+        let translated = translate_request(
+            &body,
+            TranslateOptions {
+                session_id: ctx.session_id.clone(),
+            },
+        )
+        .map_err(|error| {
+            ProviderError::new(
+                StatusCode::BAD_REQUEST,
+                ProviderErrorKind::InvalidRequest,
+                error.to_string(),
+            )
+        })?;
+        if let Some(traffic) = ctx.traffic.as_ref() {
+            traffic.write_json(
+                "020-upstream-request",
+                &serde_json::to_value(&translated).unwrap_or_default(),
+            );
+        }
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.upstream_started(&ctx.req_id);
+        }
+        let upstream = tokio::task::spawn_blocking(move || {
+            let client = client::KimiHttpClient::new();
+            let result = client.post_kimi(&translated);
+            drop(client);
+            result
+        })
+        .await
+        .map_err(|error| {
+            ProviderError::new(
+                StatusCode::BAD_GATEWAY,
+                ProviderErrorKind::Api,
+                format!("Blocking task join error: {error}"),
+            )
+        })?
+        .map_err(kimi_provider_error)?;
+        if let Some(traffic) = ctx.traffic.as_ref() {
+            traffic.write_bytes("032-upstream-response-body.sse", &upstream.body);
+        }
+        let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        let sse =
+            translate_stream_bytes(&upstream.body, &message_id, &requested).map_err(|error| {
+                ProviderError::new(
+                    StatusCode::BAD_GATEWAY,
+                    ProviderErrorKind::Api,
+                    format!("Stream translation error: {error}"),
+                )
+            })?;
+        if let Some(traffic) = ctx.traffic.as_ref() {
+            traffic.write_bytes("050-anthropic-intermediate.sse", &sse);
+        }
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse);
+            monitor.stream_progress(
+                &ctx.req_id,
+                sse.len() as u64,
+                count_sse_events(&sse),
+                input_tokens,
+                output_tokens,
+            );
+        }
+        Ok(Generation {
+            body: GenerationBody::BufferedSse(sse.into()),
+            resolved_model: resolved,
+        })
+    }
 }
 
 fn count_sse_events(bytes: &[u8]) -> u64 {
     String::from_utf8_lossy(bytes).matches("event:").count() as u64
+}
+
+fn kimi_provider_error(err: client::KimiError) -> ProviderError {
+    let (status, kind) = match err.status {
+        401 | 403 => (StatusCode::UNAUTHORIZED, ProviderErrorKind::Authentication),
+        429 => (StatusCode::TOO_MANY_REQUESTS, ProviderErrorKind::RateLimit),
+        _ => (StatusCode::BAD_GATEWAY, ProviderErrorKind::Api),
+    };
+    let mut error = ProviderError::new(status, kind, err.detail.unwrap_or(err.message));
+    if err.status == 429 {
+        error.retry_after = Some(err.retry_after.unwrap_or_else(|| "5".to_string()));
+    }
+    error
 }
 
 fn map_kimi_error_to_response(err: &client::KimiError) -> Response {

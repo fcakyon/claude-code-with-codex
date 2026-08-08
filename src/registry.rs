@@ -19,6 +19,7 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
     "opus",
     "claude-opus-4-7",
     "claude-opus-4-8",
+    "claude-opus-5",
     "fable",
     "claude-fable-5",
 ];
@@ -48,7 +49,7 @@ pub(crate) const CODEX_MODELS: &[&str] = &[
     "gpt-5.6-terra",
 ];
 
-pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "k2.6"];
+pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "kimi-k3", "k2.6", "k3"];
 pub(crate) const GROK_MODELS: &[&str] = &["grok-composer-2.5-fast", "grok-4.5"];
 
 pub struct Registry {
@@ -80,7 +81,6 @@ impl Registry {
                 .map(|model| (*model).to_string())
                 .collect(),
         );
-
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
             let handler: Arc<dyn Provider> = match name.as_str() {
@@ -103,6 +103,24 @@ impl Registry {
 
     pub fn with_default_alias() -> Self {
         Self::new(crate::config::alias_provider())
+    }
+
+    pub fn from_providers(
+        alias_provider: AliasProvider,
+        providers: impl IntoIterator<Item = Arc<dyn Provider>>,
+    ) -> Self {
+        let mut models = BTreeMap::new();
+        let mut handlers = BTreeMap::new();
+        for provider in providers {
+            let name = provider.name().to_string();
+            models.insert(name.clone(), provider.supported_models());
+            handlers.insert(name, provider);
+        }
+        Self {
+            alias_provider,
+            models,
+            handlers,
+        }
     }
 
     pub fn list_provider_names(&self) -> Vec<String> {
@@ -306,7 +324,6 @@ const CODEX_CLI: PlaceholderCli = PlaceholderCli { provider: "codex" };
 const KIMI_CLI: PlaceholderCli = PlaceholderCli { provider: "kimi" };
 const CURSOR_CLI: PlaceholderCli = PlaceholderCli { provider: "cursor" };
 const GROK_CLI: PlaceholderCli = PlaceholderCli { provider: "grok" };
-
 fn expand_codex_models() -> Vec<String> {
     let mut set = HashSet::new();
     let mut out = Vec::new();
@@ -361,7 +378,12 @@ mod tests {
     #[test]
     fn claude_5_aliases_route_to_configured_provider() {
         let registry = Registry::new(AliasProvider::Codex);
-        for model in ["claude-sonnet-5", "fable", "claude-fable-5"] {
+        for model in [
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "fable",
+            "claude-fable-5",
+        ] {
             let p = registry.provider_for_model(model, None);
             assert!(p.is_some(), "{model} should route to a provider");
             assert_eq!(p.expect("provider").name(), "codex");

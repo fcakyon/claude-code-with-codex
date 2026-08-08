@@ -1,18 +1,24 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  push:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  checks:
+    name: Full checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Test
-        run: cargo test --locked -- --test-threads=1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tools
+        run: cargo install checkle just --locked
+      - name: Run full checks
+        run: just check-ci

@@ -69,7 +69,10 @@ impl GrokClient {
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(120))
+                .tcp_nodelay(true)
+                .http2_keep_alive_interval(Duration::from_secs(15))
+                .http2_keep_alive_timeout(Duration::from_secs(5))
+                .http2_keep_alive_while_idle(true)
                 .build()?,
         );
         let auth = Arc::new(GrokAuthManager::new(file_store())?);

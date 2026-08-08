@@ -1,9 +1,15 @@
 pub mod auth;
+pub mod chat_completions;
 pub mod client;
+pub mod compaction;
 pub mod continuation;
 pub mod count_tokens;
 pub(crate) mod events;
+pub mod images;
+pub mod native;
 pub mod request_summary;
+pub mod search;
+pub mod transcription;
 pub mod translate;
 pub mod websocket;
 
@@ -14,35 +20,54 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use http::StatusCode;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::anthropic::error::json_error;
 use crate::anthropic::schema::{CountTokensResponse, MessagesRequest};
+use crate::anthropic::sse::parse_sse_events;
 use crate::config;
+use crate::logging::create_logger;
 use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::registry;
+use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
 
 use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
+use self::compaction::{
+    CompactionAttempt, abort_compaction_attempt, activate_compaction, apply_compaction_replay,
+    begin_compaction, request_compaction, store_compaction,
+};
 use self::continuation::{
-    ContinuationCandidate, clear_continuation, continuation_candidate, record_continuation,
+    ContinuationReservation, abort_continuation_for_owner, continuation_candidate_for_owner,
+    record_continuation_for_owner,
 };
 use self::count_tokens::count_translated_tokens;
 use self::translate::accumulate::accumulate_response_with_traffic;
 use self::translate::live_stream::LiveStreamTranslator;
 use self::translate::model_allowlist::{
-    assert_allowed_model, full_lane_web_search_model, resolve_model_request, uses_responses_lite,
+    assert_allowed_model, full_lane_web_search_model, resolve_model_request_with_config_override,
+    uses_responses_lite,
 };
 use self::translate::reducer::finish_metadata_from_upstream;
-use self::translate::request::{TranslateOptions, has_hosted_web_search, translate_request};
+use self::translate::request::{
+    TranslateOptions, has_hosted_web_search, is_compact_messages_request, translate_request,
+};
 
 const MAX_RETRYABLE_LIVE_STREAM_RETRIES: u32 = 10;
+const MAX_EMPTY_COMPLETION_RETRIES: u32 = 10;
+const EMPTY_CODEX_COMPLETION_DETAIL: &str = "empty_codex_completion";
+const LIVE_STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 use self::translate::stream::translate_stream_bytes_with_traffic;
 
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
+
+pub(crate) fn clear_session_compaction(session_id: &str) {
+    compaction::clear_compaction(session_id);
+}
 
 pub struct CodexProvider {
     client: Arc<CodexHttpClient>,
@@ -58,6 +83,421 @@ impl CodexProvider {
     pub fn new() -> Self {
         Self {
             client: Arc::new(CodexHttpClient::new()),
+        }
+    }
+}
+
+impl CodexProvider {
+    async fn handle_messages_inner(
+        &self,
+        body: MessagesRequest,
+        ctx: RequestContext,
+        conversation_identity: Option<ConversationIdentity>,
+    ) -> Response {
+        let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+        let want_stream = body.stream;
+        let model = body.model.as_deref().unwrap_or("gpt-5.6-sol");
+
+        let mut resolved =
+            resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
+        if let Err(e) = assert_allowed_model(&resolved.model) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!(
+                    "Model \"{model}\" resolves to unsupported model \"{}\"",
+                    e.model
+                ),
+            );
+        }
+        if search::is_standalone_search_request(&body) {
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                monitor.model_resolved(&ctx.req_id, &resolved.model);
+            }
+            let (search_request, query) = match search::build_search_request(
+                &body,
+                &resolved.model,
+                ctx.session_id.as_deref(),
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        error.to_string(),
+                    );
+                }
+            };
+            let log = create_logger("codex");
+            let started_at = Instant::now();
+            log.info(
+                "codex_standalone_search_started",
+                Some(serde_json::Map::from_iter([
+                    ("reqId".to_string(), serde_json::json!(&ctx.req_id)),
+                    ("model".to_string(), serde_json::json!(&resolved.model)),
+                    ("stream".to_string(), serde_json::json!(want_stream)),
+                ])),
+            );
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                monitor.upstream_started(&ctx.req_id);
+            }
+            let search_response = match self.client.post_search(&search_request, &ctx).await {
+                Ok(response) => response,
+                Err(error) => {
+                    log.warn(
+                        "codex_standalone_search_failed",
+                        Some(serde_json::Map::from_iter([
+                            ("reqId".to_string(), serde_json::json!(&ctx.req_id)),
+                            ("model".to_string(), serde_json::json!(&resolved.model)),
+                            ("status".to_string(), serde_json::json!(error.status)),
+                            (
+                                "ms".to_string(),
+                                serde_json::json!(started_at.elapsed().as_millis()),
+                            ),
+                        ])),
+                    );
+                    return map_codex_error_to_response(&error);
+                }
+            };
+            log.info(
+                "codex_standalone_search_completed",
+                Some(serde_json::Map::from_iter([
+                    ("reqId".to_string(), serde_json::json!(&ctx.req_id)),
+                    ("model".to_string(), serde_json::json!(&resolved.model)),
+                    (
+                        "resultCount".to_string(),
+                        serde_json::json!(search_response.results.as_ref().map(Vec::len)),
+                    ),
+                    (
+                        "ms".to_string(),
+                        serde_json::json!(started_at.elapsed().as_millis()),
+                    ),
+                ])),
+            );
+            let input_tokens = search::search_request_input_tokens(&search_request);
+            let output_tokens = search::search_response_output_tokens(&search_response);
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                monitor.usage_updated(&ctx.req_id, Some(input_tokens), Some(output_tokens));
+            }
+            return search::anthropic_search_response(
+                &search_response,
+                &query,
+                &message_id,
+                model,
+                want_stream,
+                input_tokens,
+                ctx.traffic.as_deref(),
+            );
+        }
+        let use_responses_lite = apply_model_lane_for_request(&mut resolved.model, &body);
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.model_resolved(&ctx.req_id, &resolved.model);
+        }
+
+        let mut translated = match translate_request(
+            &body,
+            TranslateOptions {
+                session_id: ctx.session_id.clone(),
+                service_tier: resolved.service_tier.clone(),
+                model: resolved.model.clone(),
+                use_responses_lite,
+            },
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    e.to_string(),
+                );
+            }
+        };
+
+        let compact_boundary = is_compact_messages_request(&body);
+        let server_compaction_enabled = config::codex_server_compaction();
+        let mut compaction_attempt = None;
+        if !server_compaction_enabled && let Some(session_id) = ctx.session_id.as_deref() {
+            compaction::clear_compaction(session_id);
+        }
+        if server_compaction_enabled
+            && compact_boundary
+            && let Some(session_id) = ctx.session_id.as_deref()
+        {
+            let attempt = begin_compaction(session_id, &translated.model);
+            compaction_attempt = Some(attempt);
+            log_compaction_event(
+                "server_compaction_triggered",
+                &ctx,
+                translated.input.len(),
+                None,
+            );
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                monitor.compaction_started(&ctx.req_id);
+            }
+            let mut compaction_ctx = ctx.clone();
+            compaction_ctx.monitor = None;
+            match request_compaction(self.client.as_ref(), &translated, &compaction_ctx).await {
+                Ok(native_history) => {
+                    if store_compaction(session_id, attempt, native_history) {
+                        log_compaction_event(
+                            "server_compaction_completed",
+                            &ctx,
+                            translated.input.len(),
+                            None,
+                        );
+                    } else {
+                        log_compaction_event(
+                            "server_compaction_failed",
+                            &ctx,
+                            translated.input.len(),
+                            Some("compaction state was superseded or exceeded the in-memory limit"),
+                        );
+                    }
+                }
+                Err(error) => {
+                    abort_compaction_attempt(Some(session_id), Some(attempt));
+                    log_compaction_event(
+                        "server_compaction_failed",
+                        &ctx,
+                        translated.input.len(),
+                        Some(&error.to_string()),
+                    );
+                }
+            }
+        } else if server_compaction_enabled
+            && !compact_boundary
+            && let Some(replay) = apply_compaction_replay(ctx.session_id.as_deref(), &translated)
+        {
+            translated = replay.request;
+            compaction_attempt = Some(replay.attempt);
+        }
+
+        // Check continuation
+        let previous_response_id_enabled = config::codex_previous_response_id();
+        let continuation = continuation_candidate_for_owner(
+            conversation_identity.as_ref(),
+            &translated,
+            previous_response_id_enabled,
+        );
+        let turn_id = continuation.turn_id();
+        let configured_transport = config::codex_transport();
+        let transport = configured_transport.as_str();
+        let upstream_started_at = Instant::now();
+        let log = create_logger("codex");
+        let req_id = ctx.req_id.clone();
+        log.info(
+            "codex_upstream_request_started",
+            Some(serde_json::Map::from_iter([
+                ("reqId".to_string(), serde_json::json!(&req_id)),
+                ("transport".to_string(), serde_json::json!(transport)),
+                ("model".to_string(), serde_json::json!(&resolved.model)),
+                ("stream".to_string(), serde_json::json!(want_stream)),
+                (
+                    "responsesLite".to_string(),
+                    serde_json::json!(use_responses_lite),
+                ),
+                (
+                    "previousResponseIdEnabled".to_string(),
+                    serde_json::json!(previous_response_id_enabled),
+                ),
+                (
+                    "hasPreviousResponseId".to_string(),
+                    serde_json::json!(continuation.candidate().previous_response_id.is_some()),
+                ),
+                (
+                    "inputDeltaCount".to_string(),
+                    serde_json::json!(continuation.candidate().input_delta.as_ref().map(Vec::len)),
+                ),
+                ("turnId".to_string(), serde_json::json!(turn_id)),
+            ])),
+        );
+
+        // Post to upstream with continuation
+        let client = self.client.clone();
+        if let Some(monitor) = ctx.monitor.as_ref() {
+            monitor.upstream_started(&ctx.req_id);
+        }
+        if want_stream {
+            let stream_request = translated.clone();
+            let response = live_stream_response(
+                client,
+                message_id,
+                model,
+                ctx,
+                stream_request,
+                continuation,
+                LiveStreamCompaction {
+                    compact_boundary,
+                    attempt: compaction_attempt,
+                },
+                configured_transport,
+            )
+            .await;
+            log.info(
+                "codex_upstream_response_ready",
+                Some(serde_json::Map::from_iter([
+                    ("reqId".to_string(), serde_json::json!(&req_id)),
+                    ("transport".to_string(), serde_json::json!(transport)),
+                    (
+                        "status".to_string(),
+                        serde_json::json!(response.status().as_u16()),
+                    ),
+                    (
+                        "ms".to_string(),
+                        serde_json::json!(upstream_started_at.elapsed().as_millis()),
+                    ),
+                ])),
+            );
+            return response;
+        }
+
+        let request_continuation = continuation.clone();
+        let mut continuation = Some(continuation);
+        let mut attempt = 0_u32;
+        let upstream = loop {
+            let response = match client
+                .post_codex_for_owner(&translated, &ctx, continuation.as_ref())
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log.warn(
+                        "codex_upstream_request_failed",
+                        Some(serde_json::Map::from_iter([
+                            ("reqId".to_string(), serde_json::json!(&req_id)),
+                            ("transport".to_string(), serde_json::json!(transport)),
+                            ("status".to_string(), serde_json::json!(e.status)),
+                            (
+                                "origin".to_string(),
+                                serde_json::json!(format!("{:?}", e.origin)),
+                            ),
+                            ("error".to_string(), serde_json::json!(&e.message)),
+                            (
+                                "ms".to_string(),
+                                serde_json::json!(upstream_started_at.elapsed().as_millis()),
+                            ),
+                        ])),
+                    );
+                    abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                    abort_continuation_for_owner(&request_continuation);
+                    return map_codex_error_to_response(&e);
+                }
+            };
+            if !is_empty_codex_success_completion(&response.body) {
+                break response;
+            }
+            // A successful terminal event with no output would translate into
+            // an empty end_turn; retry with full context instead.
+            let error = empty_buffered_completion_error();
+            drop_live_continuation_for_retry(&mut continuation);
+            if attempt >= MAX_EMPTY_COMPLETION_RETRIES {
+                abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                abort_continuation_for_owner(&request_continuation);
+                return map_codex_error_to_response(&error);
+            }
+            let delay = compute_backoff_delay(attempt, None);
+            if delay.exceeds_budget {
+                abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                abort_continuation_for_owner(&request_continuation);
+                return map_codex_error_to_response(&error);
+            }
+            attempt += 1;
+            sleep(delay.wait_ms).await;
+        };
+        log.info(
+            "codex_upstream_response_received",
+            Some(serde_json::Map::from_iter([
+                ("reqId".to_string(), serde_json::json!(&req_id)),
+                ("transport".to_string(), serde_json::json!(transport)),
+                ("status".to_string(), serde_json::json!(upstream.status)),
+                (
+                    "bodyBytes".to_string(),
+                    serde_json::json!(upstream.body.len()),
+                ),
+                (
+                    "ms".to_string(),
+                    serde_json::json!(upstream_started_at.elapsed().as_millis()),
+                ),
+            ])),
+        );
+
+        if want_stream {
+            let estimated_input_tokens = count_translated_tokens(&translated);
+            let sse_bytes = match translate_stream_bytes_with_traffic(
+                &upstream.body,
+                &message_id,
+                model,
+                estimated_input_tokens,
+                ctx.traffic.as_deref(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                    abort_continuation_for_owner(&request_continuation);
+                    return map_codex_failure_to_response(&format!(
+                        "Stream translation error: {e}"
+                    ));
+                }
+            };
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
+                monitor.stream_progress(
+                    &ctx.req_id,
+                    sse_bytes.len() as u64,
+                    count_sse_events(&sse_bytes),
+                    input_tokens,
+                    output_tokens,
+                );
+            }
+            update_continuation_from_upstream(
+                ctx.session_id.as_deref(),
+                &request_continuation,
+                compaction_attempt,
+                &translated,
+                &upstream.body,
+                upstream.socket_id,
+                compact_boundary,
+            );
+
+            let headers = [
+                (http::header::CONTENT_TYPE, "text/event-stream"),
+                (http::header::CACHE_CONTROL, "no-cache"),
+                (http::header::CONNECTION, "keep-alive"),
+            ];
+            (headers, sse_bytes).into_response()
+        } else {
+            match accumulate_response_with_traffic(
+                &upstream.body,
+                &message_id,
+                model,
+                ctx.traffic.as_deref(),
+            ) {
+                Ok(json) => {
+                    if let Some(monitor) = ctx.monitor.as_ref() {
+                        monitor.usage_updated(
+                            &ctx.req_id,
+                            json.pointer("/usage/input_tokens").and_then(|v| v.as_u64()),
+                            json.pointer("/usage/output_tokens")
+                                .and_then(|v| v.as_u64()),
+                        );
+                    }
+                    update_continuation_from_upstream(
+                        ctx.session_id.as_deref(),
+                        &request_continuation,
+                        compaction_attempt,
+                        &translated,
+                        &upstream.body,
+                        upstream.socket_id,
+                        compact_boundary,
+                    );
+                    (StatusCode::OK, Json(json)).into_response()
+                }
+                Err(e) => {
+                    abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+                    abort_continuation_for_owner(&request_continuation);
+                    map_codex_failure_to_response(&format!("Accumulation error: {e}"))
+                }
+            }
         }
     }
 }
@@ -86,153 +526,23 @@ impl Provider for CodexProvider {
     }
 
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
-        let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-        let want_stream = body.stream;
-        let model = body.model.as_deref().unwrap_or("gpt-5.6-sol");
+        self.handle_messages_inner(body, ctx, None).await
+    }
 
-        let mut resolved = resolve_model_request(model);
-        if let Err(e) = assert_allowed_model(&resolved.model) {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!(
-                    "Model \"{model}\" resolves to unsupported model \"{}\"",
-                    e.model
-                ),
-            );
-        }
-        let use_responses_lite = apply_model_lane_for_request(&mut resolved.model, &body);
-        if let Some(monitor) = ctx.monitor.as_ref() {
-            monitor.model_resolved(&ctx.req_id, &resolved.model);
-        }
-
-        let translated = match translate_request(
-            &body,
-            TranslateOptions {
-                session_id: ctx.session_id.clone(),
-                service_tier: resolved.service_tier.clone(),
-                model: resolved.model.clone(),
-                use_responses_lite,
-            },
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    e.to_string(),
-                );
-            }
-        };
-
-        // Check continuation
-        let previous_response_id_enabled = config::codex_previous_response_id();
-        let continuation = continuation_candidate(
-            ctx.session_id.as_deref(),
-            &translated,
-            previous_response_id_enabled,
-        );
-
-        // Post to upstream with continuation
-        let client = self.client.clone();
-        if let Some(monitor) = ctx.monitor.as_ref() {
-            monitor.upstream_started(&ctx.req_id);
-        }
-        if want_stream && matches!(config::codex_transport(), config::CodexTransport::WebSocket) {
-            let stream_request = translated.clone();
-            return live_stream_response(
-                client,
-                message_id,
-                model,
-                ctx,
-                stream_request,
-                continuation,
-            )
-            .await;
-        }
-
-        let upstream = match client
-            .post_codex(&translated, &ctx, Some(&continuation))
+    async fn handle_messages_with_conversation_identity(
+        &self,
+        body: MessagesRequest,
+        ctx: RequestContext,
+        conversation_identity: Option<ConversationIdentity>,
+    ) -> Response {
+        self.handle_messages_inner(body, ctx, conversation_identity)
             .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                clear_continuation(ctx.session_id.as_deref());
-                return map_codex_error_to_response(&e);
-            }
-        };
-
-        if want_stream {
-            let sse_bytes = match translate_stream_bytes_with_traffic(
-                &upstream.body,
-                &message_id,
-                model,
-                ctx.traffic.as_deref(),
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    clear_continuation(ctx.session_id.as_deref());
-                    return map_codex_failure_to_response(&format!(
-                        "Stream translation error: {e}"
-                    ));
-                }
-            };
-            if let Some(monitor) = ctx.monitor.as_ref() {
-                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
-                monitor.stream_progress(
-                    &ctx.req_id,
-                    sse_bytes.len() as u64,
-                    count_sse_events(&sse_bytes),
-                    input_tokens,
-                    output_tokens,
-                );
-            }
-            update_continuation_from_upstream(
-                ctx.session_id.as_deref(),
-                &translated,
-                &upstream.body,
-            );
-
-            let headers = [
-                (http::header::CONTENT_TYPE, "text/event-stream"),
-                (http::header::CACHE_CONTROL, "no-cache"),
-                (http::header::CONNECTION, "keep-alive"),
-            ];
-            (headers, sse_bytes).into_response()
-        } else {
-            match accumulate_response_with_traffic(
-                &upstream.body,
-                &message_id,
-                model,
-                ctx.traffic.as_deref(),
-            ) {
-                Ok(json) => {
-                    if let Some(monitor) = ctx.monitor.as_ref() {
-                        monitor.usage_updated(
-                            &ctx.req_id,
-                            json.pointer("/usage/input_tokens").and_then(|v| v.as_u64()),
-                            json.pointer("/usage/output_tokens")
-                                .and_then(|v| v.as_u64()),
-                        );
-                    }
-                    update_continuation_from_upstream(
-                        ctx.session_id.as_deref(),
-                        &translated,
-                        &upstream.body,
-                    );
-                    (StatusCode::OK, Json(json)).into_response()
-                }
-                Err(e) => {
-                    clear_continuation(ctx.session_id.as_deref());
-                    map_codex_failure_to_response(&format!("Accumulation error: {e}"))
-                }
-            }
-        }
     }
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let model = body.model.as_deref().unwrap_or("gpt-5.6-sol");
-        let mut resolved = resolve_model_request(model);
+        let mut resolved =
+            resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
         if let Err(e) = assert_allowed_model(&resolved.model) {
             return json_error(
                 StatusCode::BAD_REQUEST,
@@ -297,46 +607,157 @@ fn count_sse_events(bytes: &[u8]) -> u64 {
     String::from_utf8_lossy(bytes).matches("event:").count() as u64
 }
 
+fn log_compaction_event(
+    event: &str,
+    ctx: &RequestContext,
+    input_items: usize,
+    error: Option<&str>,
+) {
+    let mut fields = serde_json::Map::new();
+    fields.insert("reqId".into(), serde_json::json!(ctx.req_id));
+    fields.insert("inputItems".into(), serde_json::json!(input_items));
+    if let Some(error) = error {
+        fields.insert("error".into(), serde_json::json!(error));
+        create_logger("codex").warn(event, Some(fields));
+    } else {
+        create_logger("codex").info(event, Some(fields));
+    }
+}
+
+fn abort_request_state(
+    session_id: Option<&str>,
+    continuation: &ContinuationReservation,
+    compaction_attempt: Option<CompactionAttempt>,
+) {
+    abort_compaction_attempt(session_id, compaction_attempt);
+    abort_continuation_for_owner(continuation);
+}
+
+struct LiveRequestStateCleanup {
+    continuation: ContinuationReservation,
+    session_id: Option<String>,
+    compaction_attempt: Option<CompactionAttempt>,
+    armed: bool,
+}
+
+impl LiveRequestStateCleanup {
+    fn new(
+        continuation: ContinuationReservation,
+        session_id: Option<String>,
+        compaction_attempt: Option<CompactionAttempt>,
+    ) -> Self {
+        Self {
+            continuation,
+            session_id,
+            compaction_attempt,
+            armed: true,
+        }
+    }
+
+    fn abort(&mut self) {
+        if self.armed {
+            abort_request_state(
+                self.session_id.as_deref(),
+                &self.continuation,
+                self.compaction_attempt,
+            );
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for LiveRequestStateCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            abort_request_state(
+                self.session_id.as_deref(),
+                &self.continuation,
+                self.compaction_attempt,
+            );
+        }
+    }
+}
+
 enum LiveStreamStart {
     Response(Response),
     Retry {
         error: client::CodexError,
-        full_context: bool,
+        full_context_retry_attempted: bool,
     },
 }
 
+#[derive(Clone, Copy)]
+struct LiveStreamCompaction {
+    compact_boundary: bool,
+    attempt: Option<CompactionAttempt>,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn live_stream_response(
     client: Arc<CodexHttpClient>,
     message_id: String,
     model: &str,
     ctx: RequestContext,
     request_body: translate::request::ResponsesRequest,
-    continuation: ContinuationCandidate,
+    continuation: ContinuationReservation,
+    compaction: LiveStreamCompaction,
+    transport: config::CodexTransport,
 ) -> Response {
     let model = model.to_string();
+    let request_continuation = continuation.clone();
+    let mut cleanup = LiveRequestStateCleanup::new(
+        request_continuation.clone(),
+        ctx.session_id.clone(),
+        compaction.attempt,
+    );
     let mut attempt = 0_u32;
     let mut continuation = Some(continuation);
 
     loop {
-        let upstream_events = match client
-            .stream_codex_websocket_events(&request_body, &ctx, continuation.as_ref())
-            .await
-        {
+        let upstream_events = match transport {
+            config::CodexTransport::Http => {
+                client
+                    .stream_codex_http_events_for_owner(&request_body, &ctx)
+                    .await
+            }
+            config::CodexTransport::WebSocket => {
+                client
+                    .stream_codex_websocket_events_for_owner(
+                        &request_body,
+                        &ctx,
+                        continuation.as_ref(),
+                    )
+                    .await
+            }
+            config::CodexTransport::Auto => {
+                client
+                    .stream_codex_auto_events_for_owner(&request_body, &ctx, continuation.as_ref())
+                    .await
+            }
+        };
+        let upstream_events = match upstream_events {
             Ok(events) => events,
+            Err(err) if err.origin == client::CodexErrorOrigin::Http => {
+                cleanup.abort();
+                return map_codex_error_to_response(&err);
+            }
             Err(err) if retryable_live_start_codex_error(&err) => {
-                if retry_with_full_context_for_live_error(&err)
-                    && drop_live_continuation_for_retry(&mut continuation, &ctx)
-                {
+                let dropped = drop_live_continuation_for_retry(&mut continuation);
+                if dropped && is_missing_previous_response_error(&err) {
                     attempt += 1;
                     continue;
                 }
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES {
-                    clear_continuation(ctx.session_id.as_deref());
+                    cleanup.abort();
                     return map_codex_error_to_response(&err);
                 }
                 let delay = compute_backoff_delay(attempt, err.retry_after.as_deref());
                 if delay.exceeds_budget {
-                    clear_continuation(ctx.session_id.as_deref());
+                    cleanup.abort();
                     return map_codex_error_to_response(&err);
                 }
                 attempt += 1;
@@ -344,7 +765,7 @@ async fn live_stream_response(
                 continue;
             }
             Err(err) => {
-                clear_continuation(ctx.session_id.as_deref());
+                cleanup.abort();
                 return map_codex_error_to_response(&err);
             }
         };
@@ -354,26 +775,44 @@ async fn live_stream_response(
             message_id.clone(),
             &model,
             ctx.clone(),
+            request_continuation.clone(),
             request_body.clone(),
+            compaction,
         )
         .await
         {
-            LiveStreamStart::Response(response) => return response,
+            LiveStreamStart::Response(response) => {
+                cleanup.disarm();
+                return response;
+            }
             LiveStreamStart::Retry {
                 error,
-                full_context,
+                full_context_retry_attempted,
             } => {
-                if full_context && drop_live_continuation_for_retry(&mut continuation, &ctx) {
+                // The incremental HTTP reader performs its own bounded
+                // pre-semantic retries so it can stop immediately when the
+                // consumer disappears. Do not multiply that exhausted retry
+                // loop by the provider-level WebSocket retry policy.
+                if error.origin == client::CodexErrorOrigin::Http {
+                    cleanup.abort();
+                    return map_codex_error_to_response(&error);
+                }
+                let dropped = drop_live_continuation_for_retry(&mut continuation);
+                if full_context_retry_attempted && client::is_continuation_retry_error(&error) {
+                    cleanup.abort();
+                    return map_codex_error_to_response(&error);
+                }
+                if dropped && is_missing_previous_response_error(&error) {
                     attempt += 1;
                     continue;
                 }
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES {
-                    clear_continuation(ctx.session_id.as_deref());
+                    cleanup.abort();
                     return map_codex_error_to_response(&error);
                 }
                 let delay = compute_backoff_delay(attempt, error.retry_after.as_deref());
                 if delay.exceeds_budget {
-                    clear_continuation(ctx.session_id.as_deref());
+                    cleanup.abort();
                     return map_codex_error_to_response(&error);
                 }
                 attempt += 1;
@@ -383,33 +822,63 @@ async fn live_stream_response(
     }
 }
 
+fn provider_retry(
+    upstream_events: &websocket::CodexWebSocketEventStream,
+    error: client::CodexError,
+) -> LiveStreamStart {
+    let full_context_retry_attempted = upstream_events.used_full_context_retry();
+    upstream_events.mark_provider_retry_handoff();
+    LiveStreamStart::Retry {
+        error,
+        full_context_retry_attempted,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn live_stream_response_once(
-    mut upstream_events: websocket::CodexWebSocketEventReceiver,
+    mut upstream_events: websocket::CodexWebSocketEventStream,
     message_id: String,
     model: &str,
     ctx: RequestContext,
+    request_continuation: ContinuationReservation,
     request_body: translate::request::ResponsesRequest,
+    compaction: LiveStreamCompaction,
 ) -> LiveStreamStart {
-    let mut translator = LiveStreamTranslator::new(message_id, model.to_string());
+    let estimated_input_tokens = count_translated_tokens(&request_body);
+    let mut translator = LiveStreamTranslator::with_estimated_input_tokens(
+        message_id,
+        model.to_string(),
+        estimated_input_tokens,
+    );
     let mut upstream_sse_body = Vec::new();
+    // Keep protocol framing private until real output makes a transparent retry unsafe.
+    // Every branch that consumes pending_chunk returns, so it is never flushed twice.
+    let mut pending_chunk = Vec::new();
+    let mut generation_started = false;
 
     while let Some(item) = upstream_events.recv().await {
         let payload = match item {
             Ok(payload) => payload,
             Err(err) => {
                 if retryable_live_start_codex_error(&err) {
-                    let full_context = retry_with_full_context_for_live_error(&err);
-                    return LiveStreamStart::Retry {
-                        error: err,
-                        full_context,
-                    };
+                    return provider_retry(&upstream_events, err);
                 }
-                clear_continuation(ctx.session_id.as_deref());
+                abort_request_state(
+                    ctx.session_id.as_deref(),
+                    &request_continuation,
+                    compaction.attempt,
+                );
                 return LiveStreamStart::Response(map_codex_error_to_response(&err));
             }
         };
+        if !generation_started && codex_generation_event(&payload) {
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                monitor.generation_started(&ctx.req_id);
+            }
+            generation_started = true;
+        }
         append_upstream_sse_payload(&mut upstream_sse_body, &payload);
-        let (chunk, terminal) = match translate_live_stream_payload(&mut translator, &payload, &ctx)
+        let (chunk, terminal) = match translate_live_stream_payload(&mut translator, &payload, None)
         {
             Ok(result) => result,
             Err(message) => {
@@ -436,70 +905,132 @@ async fn live_stream_response_once(
                             503
                         }
                     });
-                    return LiveStreamStart::Retry {
-                        error: client::CodexError {
+                    return provider_retry(
+                        &upstream_events,
+                        client::CodexError {
                             status,
                             message: message.clone(),
                             detail: Some(message),
                             retry_after: retry_after_from_live_payload(&payload),
                             origin: client::CodexErrorOrigin::WebSocket,
                         },
-                        full_context: false,
-                    };
+                    );
                 }
-                clear_continuation(ctx.session_id.as_deref());
+                abort_request_state(
+                    ctx.session_id.as_deref(),
+                    &request_continuation,
+                    compaction.attempt,
+                );
                 return LiveStreamStart::Response(map_codex_failure_to_response(&message));
             }
         };
-        if !chunk.is_empty() {
-            record_live_stream_progress(&ctx, &chunk);
+        pending_chunk.extend_from_slice(&chunk);
+        if terminal
+            && is_codex_success_terminal_event(&payload)
+            && !translator.has_semantic_output()
+        {
+            return provider_retry(&upstream_events, empty_live_completion_error());
+        }
+        if translator.has_semantic_output() && !pending_chunk.is_empty() {
+            record_live_stream_downstream_capture(&ctx, &pending_chunk);
+            record_live_stream_progress(&ctx, &pending_chunk);
             if terminal {
                 update_continuation_from_upstream(
                     ctx.session_id.as_deref(),
+                    &request_continuation,
+                    compaction.attempt,
                     &request_body,
                     &upstream_sse_body,
+                    upstream_events.socket_id(),
+                    compaction.compact_boundary,
                 );
-                return LiveStreamStart::Response(single_live_stream_response(chunk));
+                return LiveStreamStart::Response(single_live_stream_response(pending_chunk));
             }
             return LiveStreamStart::Response(remaining_live_stream_response(
                 upstream_events,
                 translator,
-                chunk,
+                pending_chunk,
                 ctx,
+                request_continuation,
                 request_body,
                 upstream_sse_body,
+                compaction,
             ));
         }
         if terminal {
             update_continuation_from_upstream(
                 ctx.session_id.as_deref(),
+                &request_continuation,
+                compaction.attempt,
                 &request_body,
                 &upstream_sse_body,
+                upstream_events.socket_id(),
+                compaction.compact_boundary,
             );
-            return LiveStreamStart::Response(empty_live_stream_response());
+            if pending_chunk.is_empty() {
+                return LiveStreamStart::Response(empty_live_stream_response());
+            }
+            record_live_stream_downstream_capture(&ctx, &pending_chunk);
+            record_live_stream_progress(&ctx, &pending_chunk);
+            return LiveStreamStart::Response(single_live_stream_response(pending_chunk));
         }
     }
 
-    LiveStreamStart::Retry {
-        error: client::CodexError {
+    provider_retry(
+        &upstream_events,
+        client::CodexError {
             status: 0,
             message: "WebSocket connection closed before terminal Codex response event".to_string(),
             detail: Some(websocket::WEBSOCKET_MISSING_TERMINAL_DETAIL.to_string()),
             retry_after: None,
             origin: client::CodexErrorOrigin::WebSocket,
         },
-        full_context: true,
+    )
+}
+
+fn empty_live_completion_error() -> client::CodexError {
+    client::CodexError {
+        status: 503,
+        message: "Codex completed without producing output".to_string(),
+        detail: Some(EMPTY_CODEX_COMPLETION_DETAIL.to_string()),
+        retry_after: None,
+        origin: client::CodexErrorOrigin::WebSocket,
     }
+}
+
+fn codex_generation_event(payload: &serde_json::Value) -> bool {
+    !matches!(
+        payload.get("type").and_then(|value| value.as_str()),
+        Some("codex.rate_limits" | "keepalive") | None
+    )
 }
 
 fn translate_live_stream_payload(
     translator: &mut LiveStreamTranslator,
     payload: &serde_json::Value,
-    ctx: &RequestContext,
+    traffic: Option<&crate::traffic::TrafficCapture>,
 ) -> Result<(Vec<u8>, bool), String> {
-    let chunk = translator.accept(payload, ctx.traffic.as_deref())?;
+    let chunk = translator.accept(payload, traffic)?;
     let terminal = is_codex_terminal_event(payload) || translator.is_finished();
     Ok((chunk, terminal))
+}
+
+fn record_live_stream_downstream_capture(ctx: &RequestContext, chunk: &[u8]) {
+    let Some(traffic) = ctx.traffic.as_ref() else {
+        return;
+    };
+    for event in parse_sse_events(chunk) {
+        let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+            continue;
+        };
+        traffic.write_json_event(
+            "050-downstream-event",
+            &serde_json::json!({
+                "event": event.event.as_deref().unwrap_or("message"),
+                "data": data,
+            }),
+        );
+    }
 }
 
 fn record_live_stream_progress(ctx: &RequestContext, chunk: &[u8]) {
@@ -525,59 +1056,118 @@ fn empty_live_stream_response() -> Response {
     event_stream_response(futures_util::stream::empty::<Result<Bytes, std::io::Error>>())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn remaining_live_stream_response(
-    mut upstream_events: websocket::CodexWebSocketEventReceiver,
+    mut upstream_events: websocket::CodexWebSocketEventStream,
     mut translator: LiveStreamTranslator,
     first_chunk: Vec<u8>,
     ctx: RequestContext,
+    request_continuation: ContinuationReservation,
     request_body: translate::request::ResponsesRequest,
     mut upstream_sse_body: Vec<u8>,
+    compaction: LiveStreamCompaction,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     tokio::spawn(async move {
         if tx.send(Ok(Bytes::from(first_chunk))).await.is_err() {
-            clear_continuation(ctx.session_id.as_deref());
+            abort_request_state(
+                ctx.session_id.as_deref(),
+                &request_continuation,
+                compaction.attempt,
+            );
             return;
         }
-        while let Some(item) = upstream_events.recv().await {
-            match item {
-                Ok(payload) => {
-                    append_upstream_sse_payload(&mut upstream_sse_body, &payload);
-                    let (chunk, terminal) =
-                        match translate_live_stream_payload(&mut translator, &payload, &ctx) {
-                            Ok(result) => result,
-                            Err(message) => {
-                                clear_continuation(ctx.session_id.as_deref());
-                                let chunk = translator.error_chunk(
-                                    &message,
-                                    "api_error",
-                                    ctx.traffic.as_deref(),
-                                );
-                                if !chunk.is_empty() {
-                                    record_live_stream_progress(&ctx, &chunk);
-                                    let _ = tx.send(Ok(Bytes::from(chunk))).await;
-                                }
-                                return;
-                            }
-                        };
+        let mut heartbeat = tokio::time::interval(LIVE_STREAM_HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await;
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = tx.closed() => {
+                    abort_request_state(
+                        ctx.session_id.as_deref(),
+                        &request_continuation,
+                        compaction.attempt,
+                    );
+                    return;
+                }
+                item = upstream_events.recv() => item,
+                _ = heartbeat.tick() => {
+                    let chunk = translator.ping_chunk(ctx.traffic.as_deref());
                     if !chunk.is_empty() {
                         record_live_stream_progress(&ctx, &chunk);
                         if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
-                            clear_continuation(ctx.session_id.as_deref());
+                            abort_request_state(
+                                ctx.session_id.as_deref(),
+                                &request_continuation,
+                                compaction.attempt,
+                            );
+                            return;
+                        }
+                    }
+                    continue;
+                }
+            };
+            let Some(item) = item else {
+                break;
+            };
+            match item {
+                Ok(payload) => {
+                    append_upstream_sse_payload(&mut upstream_sse_body, &payload);
+                    let (chunk, terminal) = match translate_live_stream_payload(
+                        &mut translator,
+                        &payload,
+                        ctx.traffic.as_deref(),
+                    ) {
+                        Ok(result) => result,
+                        Err(message) => {
+                            abort_request_state(
+                                ctx.session_id.as_deref(),
+                                &request_continuation,
+                                compaction.attempt,
+                            );
+                            let chunk = translator.error_chunk(
+                                &message,
+                                "api_error",
+                                ctx.traffic.as_deref(),
+                            );
+                            if !chunk.is_empty() {
+                                record_live_stream_progress(&ctx, &chunk);
+                                let _ = tx.send(Ok(Bytes::from(chunk))).await;
+                            }
+                            return;
+                        }
+                    };
+                    if !chunk.is_empty() {
+                        record_live_stream_progress(&ctx, &chunk);
+                        if tx.send(Ok(Bytes::from(chunk))).await.is_err() {
+                            abort_request_state(
+                                ctx.session_id.as_deref(),
+                                &request_continuation,
+                                compaction.attempt,
+                            );
                             return;
                         }
                     }
                     if terminal {
                         update_continuation_from_upstream(
                             ctx.session_id.as_deref(),
+                            &request_continuation,
+                            compaction.attempt,
                             &request_body,
                             &upstream_sse_body,
+                            upstream_events.socket_id(),
+                            compaction.compact_boundary,
                         );
                         return;
                     }
                 }
                 Err(err) => {
-                    clear_continuation(ctx.session_id.as_deref());
+                    abort_request_state(
+                        ctx.session_id.as_deref(),
+                        &request_continuation,
+                        compaction.attempt,
+                    );
                     let chunk =
                         translator.finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
                     if !chunk.is_empty() {
@@ -600,7 +1190,11 @@ fn remaining_live_stream_response(
             }
         }
 
-        clear_continuation(ctx.session_id.as_deref());
+        abort_request_state(
+            ctx.session_id.as_deref(),
+            &request_continuation,
+            compaction.attempt,
+        );
         let chunk = translator.finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
         if !chunk.is_empty() {
             record_live_stream_progress(&ctx, &chunk);
@@ -608,7 +1202,7 @@ fn remaining_live_stream_response(
             return;
         }
         let chunk = translator.error_chunk(
-            "WebSocket connection closed before terminal Codex response event",
+            "Upstream event stream closed before terminal Codex response event",
             "api_error",
             ctx.traffic.as_deref(),
         );
@@ -646,6 +1240,45 @@ where
     (headers, Body::from_stream(stream)).into_response()
 }
 
+fn empty_buffered_completion_error() -> client::CodexError {
+    client::CodexError {
+        status: 503,
+        message: "Codex completed without producing output".to_string(),
+        detail: Some(EMPTY_CODEX_COMPLETION_DETAIL.to_string()),
+        retry_after: None,
+        origin: match config::codex_transport() {
+            config::CodexTransport::Http => client::CodexErrorOrigin::BufferedHttp,
+            _ => client::CodexErrorOrigin::BufferedWebSocket,
+        },
+    }
+}
+
+/// True when the buffered upstream body ended in a successful terminal event
+/// without ever producing semantic output (text, thinking, tool, web search).
+fn is_empty_codex_success_completion(upstream_sse: &[u8]) -> bool {
+    use self::translate::reducer::{ReducerEvent, TERM_COMPLETED, TERM_DONE};
+
+    let Ok(events) = self::translate::reducer::reduce_upstream_bytes(upstream_sse) else {
+        return false;
+    };
+    let mut saw_success_terminal = false;
+    for event in &events {
+        match event {
+            ReducerEvent::TextDelta { text, .. } if !text.is_empty() => return false,
+            ReducerEvent::ThinkingStart { .. }
+            | ReducerEvent::ToolStart { .. }
+            | ReducerEvent::WebSearch { .. } => return false,
+            ReducerEvent::Finish { terminal_type, .. }
+                if terminal_type == TERM_COMPLETED || terminal_type == TERM_DONE =>
+            {
+                saw_success_terminal = true;
+            }
+            _ => {}
+        }
+    }
+    saw_success_terminal
+}
+
 fn is_codex_terminal_event(payload: &serde_json::Value) -> bool {
     matches!(
         payload.get("type").and_then(|v| v.as_str()),
@@ -658,37 +1291,47 @@ fn is_codex_terminal_event(payload: &serde_json::Value) -> bool {
     )
 }
 
+fn is_codex_success_terminal_event(payload: &serde_json::Value) -> bool {
+    matches!(
+        payload.get("type").and_then(|v| v.as_str()),
+        Some("response.completed") | Some("response.done")
+    )
+}
+
 fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {
     if err.origin == client::CodexErrorOrigin::WebSocketHandshake {
+        if err.detail.as_deref() == Some(websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL) {
+            return false;
+        }
         return err.status == 0 || matches!(err.status, 429 | 500 | 502 | 503 | 504 | 529);
+    }
+    if err.detail.as_deref() == Some(websocket::WEBSOCKET_KEEPALIVE_FAILURE_DETAIL) {
+        return true;
     }
     matches!(err.status, 429 | 500 | 502 | 503 | 504 | 529)
         || (err.status == 0 && retryable_live_message(codex_error_message(err)))
 }
 
-fn retry_with_full_context_for_live_error(err: &client::CodexError) -> bool {
+fn is_missing_previous_response_error(err: &client::CodexError) -> bool {
     matches!(
         err.detail.as_deref(),
         Some("previous_response_not_found")
-            | Some(websocket::WEBSOCKET_RESPONSE_START_TIMEOUT_DETAIL)
-            | Some(websocket::WEBSOCKET_MISSING_TERMINAL_DETAIL)
+            | Some(websocket::WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL)
     )
 }
 
-fn drop_live_continuation_for_retry(
-    continuation: &mut Option<ContinuationCandidate>,
-    ctx: &RequestContext,
-) -> bool {
+fn drop_live_continuation_for_retry(continuation: &mut Option<ContinuationReservation>) -> bool {
     if continuation
         .as_ref()
-        .and_then(|candidate| candidate.previous_response_id.as_deref())
+        .and_then(|reservation| reservation.candidate().previous_response_id.as_deref())
         .is_none()
     {
         return false;
     }
 
-    clear_continuation(ctx.session_id.as_deref());
-    *continuation = None;
+    if let Some(reservation) = continuation.as_ref() {
+        *continuation = Some(reservation.full_context_retry());
+    }
     true
 }
 
@@ -702,6 +1345,8 @@ fn retryable_live_message(message: &str) -> bool {
         "timed out",
         "connection closed",
         "connection reset",
+        "broken pipe",
+        "epipe",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -729,21 +1374,38 @@ fn codex_stream_error_type(err: &client::CodexError) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_continuation_from_upstream(
     session_id: Option<&str>,
+    continuation: &ContinuationReservation,
+    compaction_attempt: Option<CompactionAttempt>,
     request_body: &translate::request::ResponsesRequest,
     upstream_body: &[u8],
+    socket_id: Option<u64>,
+    compact_boundary: bool,
 ) {
     match finish_metadata_from_upstream(upstream_body) {
         Ok(Some(finish)) if finish.continuation_eligible => {
-            record_continuation(
-                session_id,
+            if compact_boundary {
+                activate_compaction(
+                    session_id,
+                    compaction_attempt,
+                    &request_body.model,
+                    &finish.output_items,
+                );
+            }
+            record_continuation_for_owner(
+                continuation,
                 request_body,
                 finish.response_id.as_deref(),
+                socket_id,
                 &finish.output_items,
             );
         }
-        _ => clear_continuation(session_id),
+        _ => {
+            abort_compaction_attempt(session_id, compaction_attempt);
+            abort_continuation_for_owner(continuation);
+        }
     }
 }
 
@@ -756,30 +1418,34 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
     if is_context_window_overflow(message) {
         return map_codex_failure_to_response(message);
     }
+    if err.detail.as_deref() == Some(EMPTY_CODEX_COMPLETION_DETAIL) {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "api_error", &err.message);
+    }
 
     match err.status {
-        401 | 403 => json_error(
+        401 => json_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
             err.detail.as_deref().unwrap_or("Authentication failed"),
         ),
+        403 => json_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            err.detail.as_deref().unwrap_or("Permission denied"),
+        ),
         429 => {
-            let retry_after = err.retry_after.as_deref().unwrap_or("5");
-            let resp = json_error(
+            let response = json_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limit_error",
                 &err.message,
             );
-            let headers = [(http::header::RETRY_AFTER, retry_after)];
-            (headers, resp).into_response()
+            if let Some(retry_after) = err.retry_after.as_deref() {
+                ([(http::header::RETRY_AFTER, retry_after)], response).into_response()
+            } else {
+                response
+            }
         }
-        status @ (500 | 502 | 503 | 504 | 529)
-            if matches!(
-                err.origin,
-                client::CodexErrorOrigin::BufferedHttp
-                    | client::CodexErrorOrigin::BufferedWebSocket
-            ) =>
-        {
+        status @ (400..=599) => {
             let response = json_error(
                 StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
                 if status == 529 {
@@ -816,13 +1482,11 @@ fn is_context_window_overflow(message: &str) -> bool {
 }
 
 fn codex_error_message(err: &client::CodexError) -> &str {
-    err.detail.as_deref().unwrap_or({
-        if err.status == 0 {
-            err.message.as_str()
-        } else {
-            "Upstream error"
-        }
-    })
+    if err.status == 0 {
+        err.message.as_str()
+    } else {
+        err.detail.as_deref().unwrap_or("Upstream error")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +1570,202 @@ fn format_expiry(expires: u64, now: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::{SinkExt, StreamExt};
+    use http_body_util::BodyExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_tungstenite::tungstenite::Message;
+
     use super::*;
+
+    fn live_test_request(text: &str) -> translate::request::ResponsesRequest {
+        translate::request::ResponsesRequest {
+            model: "gpt-5.6-sol".to_string(),
+            instructions: None,
+            input: vec![translate::request::ResponsesInputItem::Message {
+                role: "user".to_string(),
+                content: vec![translate::request::ResponsesContentPart::InputText {
+                    text: text.to_string(),
+                }],
+            }],
+            tools: None,
+            tool_choice: None,
+            store: false,
+            stream: true,
+            parallel_tool_calls: true,
+            include: None,
+            client_metadata: None,
+            service_tier: None,
+            prompt_cache_key: None,
+            text: translate::request::ResponsesText {
+                verbosity: None,
+                format: None,
+            },
+            reasoning: None,
+        }
+    }
+
+    fn live_test_context(session_id: &str) -> RequestContext {
+        RequestContext {
+            req_id: format!("request-{session_id}"),
+            session_id: Some(session_id.to_string()),
+            session_seq: None,
+            provider: "codex".to_string(),
+            traffic: None,
+            monitor: None,
+            passthrough: None,
+        }
+    }
+
+    fn authenticated_live_test_client(base_url: String) -> Arc<CodexHttpClient> {
+        let client = CodexHttpClient::new_for_test(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+            base_url,
+            1_000,
+            1_000,
+            0,
+        );
+        client
+            .auth_manager()
+            .set_test_auth(auth::token_store::StoredAuth {
+                access: "test".to_string(),
+                refresh: String::new(),
+                expires: u64::MAX,
+                account_id: Some("acct".to_string()),
+            });
+        Arc::new(client)
+    }
+
+    async fn next_live_websocket_request(
+        websocket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+    ) -> serde_json::Value {
+        loop {
+            match websocket.next().await {
+                Some(Ok(Message::Ping(payload))) => {
+                    websocket.send(Message::Pong(payload)).await.unwrap();
+                }
+                Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
+                other => panic!("unexpected WebSocket request frame: {other:?}"),
+            }
+        }
+    }
+
+    async fn emit_live_event(
+        websocket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+        event: &serde_json::Value,
+    ) {
+        websocket
+            .send(Message::Text(event.to_string()))
+            .await
+            .unwrap();
+    }
+
+    fn upstream_sse(events: &[serde_json::Value]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for event in events {
+            bytes.extend_from_slice(format!("data: {event}\n\n").as_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn terminal_only_completed_upstream_is_empty_completion() {
+        let body = upstream_sse(&[serde_json::json!({
+            "type": "response.completed",
+            "response": {"id": "resp_1", "status": "completed", "incomplete_details": null, "usage": {"input_tokens": 5, "output_tokens": 0}}
+        })]);
+        assert!(is_empty_codex_success_completion(&body));
+    }
+
+    #[test]
+    fn terminal_only_done_upstream_is_empty_completion() {
+        let body = upstream_sse(&[serde_json::json!({
+            "type": "response.done",
+            "response": {"id": "resp_1", "usage": {}}
+        })]);
+        assert!(is_empty_codex_success_completion(&body));
+    }
+
+    #[test]
+    fn empty_message_item_is_empty_completion() {
+        let body = upstream_sse(&[
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "message", "id": "msg_1"}
+            }),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "message"}
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": "resp_1", "usage": {}}
+            }),
+        ]);
+        assert!(is_empty_codex_success_completion(&body));
+    }
+
+    #[test]
+    fn upstream_with_text_is_not_empty_completion() {
+        let body = upstream_sse(&[
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "message", "id": "msg_1"}
+            }),
+            serde_json::json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": "hello"
+            }),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "message"}
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": "resp_1", "usage": {}}
+            }),
+        ]);
+        assert!(!is_empty_codex_success_completion(&body));
+    }
+
+    #[test]
+    fn upstream_with_tool_call_is_not_empty_completion() {
+        let body = upstream_sse(&[
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_1", "name": "Read", "arguments": ""}
+            }),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_1", "name": "Read", "arguments": "{}"}
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": "resp_1", "usage": {}}
+            }),
+        ]);
+        assert!(!is_empty_codex_success_completion(&body));
+    }
+
+    #[test]
+    fn terminal_only_incomplete_upstream_is_not_empty_completion() {
+        let body = upstream_sse(&[serde_json::json!({
+            "type": "response.incomplete",
+            "response": {"id": "resp_1", "incomplete_details": {"reason": "max_output_tokens"}, "usage": {}}
+        })]);
+        assert!(!is_empty_codex_success_completion(&body));
+    }
+
+    #[test]
+    fn upstream_without_terminal_event_is_not_empty_completion() {
+        assert!(!is_empty_codex_success_completion(&upstream_sse(&[])));
+    }
 
     fn request_with_tools(tools: serde_json::Value) -> MessagesRequest {
         serde_json::from_value(serde_json::json!({
@@ -953,6 +1812,19 @@ mod tests {
     }
 
     #[test]
+    fn generation_timing_ignores_control_events() {
+        assert!(!codex_generation_event(&serde_json::json!({
+            "type": "codex.rate_limits"
+        })));
+        assert!(!codex_generation_event(&serde_json::json!({
+            "type": "keepalive"
+        })));
+        assert!(codex_generation_event(&serde_json::json!({
+            "type": "response.created"
+        })));
+    }
+
+    #[test]
     fn live_stream_progress_records_terminal_usage() {
         let monitor = crate::monitor::MonitorHandle::new(10);
         monitor.request_started(
@@ -977,6 +1849,126 @@ mod tests {
         let state = monitor.snapshot();
         assert_eq!(state.active[0].input_tokens, Some(12));
         assert_eq!(state.active[0].output_tokens, Some(48));
+    }
+
+    #[tokio::test]
+    async fn live_stream_response_emits_downstream_frames_before_terminal_event() {
+        use http_body_util::BodyExt as _;
+
+        let body = request_with_tools(serde_json::json!([]));
+        let request_body = translate_request(
+            &body,
+            TranslateOptions {
+                session_id: None,
+                service_tier: None,
+                model: "gpt-5.6-sol".to_string(),
+                use_responses_lite: true,
+            },
+        )
+        .unwrap();
+        let ctx = RequestContext {
+            req_id: "incremental-http".to_string(),
+            session_id: None,
+            session_seq: None,
+            provider: "codex".to_string(),
+            traffic: None,
+            monitor: None,
+            passthrough: None,
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.send(Ok(serde_json::json!({"type": "keepalive"})))
+            .await
+            .unwrap();
+        tx.send(Ok(serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "message", "id": "msg_up"}
+        })))
+        .await
+        .unwrap();
+        tx.send(Ok(serde_json::json!({
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "delta": "first"
+        })))
+        .await
+        .unwrap();
+
+        let (rx, _) = websocket::CodexWebSocketEventStream::pending(rx);
+        let continuation = ContinuationReservation::for_owner_turn(None, None);
+        let response = match live_stream_response_once(
+            rx,
+            "msg_test".to_string(),
+            "claude-opus-4-8",
+            ctx,
+            continuation,
+            request_body,
+            LiveStreamCompaction {
+                compact_boundary: false,
+                attempt: None,
+            },
+        )
+        .await
+        {
+            LiveStreamStart::Response(response) => response,
+            LiveStreamStart::Retry { error, .. } => panic!("unexpected retry: {error}"),
+        };
+        let mut body = response.into_body();
+        let first = tokio::time::timeout(Duration::from_millis(200), body.frame())
+            .await
+            .expect("initial downstream frame must be available immediately")
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let first = String::from_utf8(first.to_vec()).unwrap();
+        assert!(first.contains("event: message_start"));
+        assert!(first.contains("event: ping"));
+        assert!(first.contains("event: content_block_start"));
+        assert!(first.contains("event: content_block_delta"));
+
+        tx.send(Ok(serde_json::json!({
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "delta": "second"
+        })))
+        .await
+        .unwrap();
+        let second = tokio::time::timeout(Duration::from_millis(200), body.frame())
+            .await
+            .expect("text delta must arrive before the terminal event")
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        assert!(
+            String::from_utf8(second.to_vec())
+                .unwrap()
+                .contains("event: content_block_delta")
+        );
+
+        for payload in [
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "message"}
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_1",
+                    "status": "completed",
+                    "incomplete_details": null,
+                    "usage": {"input_tokens": 1, "output_tokens": 1}
+                }
+            }),
+        ] {
+            tx.send(Ok(payload)).await.unwrap();
+        }
+        drop(tx);
+        while let Some(frame) = body.frame().await {
+            frame.unwrap();
+        }
     }
 
     #[test]
@@ -1011,6 +2003,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_upstream_status_and_retry_after_are_preserved() {
+        let err = client::CodexError {
+            status: 422,
+            message: "invalid request".to_string(),
+            detail: Some("invalid request".to_string()),
+            retry_after: Some("7".to_string()),
+            origin: client::CodexErrorOrigin::WebSocketHandshake,
+        };
+        let response = map_codex_error_to_response(&err);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response.headers().get(http::header::RETRY_AFTER).unwrap(),
+            "7"
+        );
+    }
+
+    #[tokio::test]
     async fn statusless_codex_error_returns_source_message() {
         let err = client::CodexError {
             status: 0,
@@ -1033,6 +2042,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn empty_live_completion_maps_to_explicit_service_unavailable() {
+        let err = empty_live_completion_error();
+
+        assert_eq!(err.status, 503);
+        assert_eq!(err.detail.as_deref(), Some(EMPTY_CODEX_COMPLETION_DETAIL));
+        assert_eq!(
+            map_codex_error_to_response(&err).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
     #[test]
     fn live_start_statusless_websocket_handshake_error_is_retryable() {
         let err = client::CodexError {
@@ -1041,6 +2062,32 @@ mod tests {
             detail: None,
             retry_after: None,
             origin: client::CodexErrorOrigin::WebSocketHandshake,
+        };
+
+        assert!(retryable_live_start_codex_error(&err));
+    }
+
+    #[test]
+    fn live_start_proxy_tunnel_rejection_is_not_retryable() {
+        let err = client::CodexError {
+            status: 0,
+            message: "WebSocket proxy tunnel was rejected".to_string(),
+            detail: Some(websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL.to_string()),
+            retry_after: None,
+            origin: client::CodexErrorOrigin::WebSocketHandshake,
+        };
+
+        assert!(!retryable_live_start_codex_error(&err));
+    }
+
+    #[test]
+    fn live_start_keepalive_failure_is_retryable() {
+        let err = client::CodexError {
+            status: 0,
+            message: "WebSocket keepalive error: test write failed".to_string(),
+            detail: Some(websocket::WEBSOCKET_KEEPALIVE_FAILURE_DETAIL.to_string()),
+            retry_after: None,
+            origin: client::CodexErrorOrigin::WebSocket,
         };
 
         assert!(retryable_live_start_codex_error(&err));
@@ -1069,5 +2116,386 @@ mod tests {
             }),
             "bad request",
         ));
+    }
+
+    async fn run_live_failure_case(
+        session_id: &str,
+        event: serde_json::Value,
+        expected_attempts: usize,
+    ) -> StatusCode {
+        let owner = ConversationIdentity::Main(session_id.to_string());
+        continuation::clear_continuation_for_owner(Some(&owner));
+        websocket::invalidate_codex_websocket_pool_owner(&owner);
+        let request = live_test_request("one");
+        let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
+        let compaction_attempt = begin_compaction(session_id, &request.model);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..expected_attempts {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _ = next_live_websocket_request(&mut websocket).await;
+                emit_live_event(&mut websocket, &event).await;
+                drop(websocket);
+            }
+        });
+        let client = authenticated_live_test_client(format!("http://{addr}/responses"));
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            live_stream_response(
+                client,
+                "message".to_string(),
+                &request.model,
+                live_test_context(session_id),
+                request.clone(),
+                continuation.clone(),
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: Some(compaction_attempt),
+                },
+                config::CodexTransport::WebSocket,
+            ),
+        )
+        .await
+        .expect("live failure case timed out");
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("live failure server timed out")
+            .expect("live failure server failed");
+
+        assert!(!continuation::is_current_turn_for_owner(&continuation));
+        assert!(!store_compaction(
+            session_id,
+            compaction_attempt,
+            Vec::new()
+        ));
+        websocket::invalidate_codex_websocket_pool_owner(&owner);
+        response.status()
+    }
+
+    #[tokio::test]
+    async fn dropping_live_stream_during_retry_backoff_aborts_request_state() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let session_id = "live-retry-backoff-cleanup";
+        let owner = ConversationIdentity::Main(session_id.to_string());
+        continuation::clear_continuation_for_owner(Some(&owner));
+        websocket::invalidate_codex_websocket_pool_owner(&owner);
+        let request = live_test_request("one");
+        let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
+        let compaction_attempt = begin_compaction(session_id, &request.model);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (event_sent_tx, event_sent_rx) = tokio::sync::oneshot::channel();
+        let (socket_closed_tx, socket_closed_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_live_websocket_request(&mut websocket).await;
+            emit_live_event(
+                &mut websocket,
+                &serde_json::json!({
+                    "type": "codex.rate_limits",
+                    "rate_limits": {"allowed": false, "limit_reached": true}
+                }),
+            )
+            .await;
+            event_sent_tx.send(()).unwrap();
+            drop(websocket);
+            socket_closed_tx.send(()).unwrap();
+        });
+        let client = authenticated_live_test_client(format!("http://{addr}/responses"));
+        let task_request = request.clone();
+        let task_continuation = continuation.clone();
+        let response_task = tokio::spawn(async move {
+            let model = task_request.model.clone();
+            live_stream_response(
+                client,
+                "message".to_string(),
+                &model,
+                live_test_context(session_id),
+                task_request,
+                task_continuation,
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: Some(compaction_attempt),
+                },
+                config::CodexTransport::WebSocket,
+            )
+            .await
+        });
+
+        event_sent_rx.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), socket_closed_rx)
+            .await
+            .expect("retry handoff did not close the abandoned attempt socket")
+            .expect("retry handoff socket-close sender dropped");
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !response_task.is_finished(),
+            "logical request must still be waiting in retry backoff"
+        );
+        response_task.abort();
+        assert!(response_task.await.unwrap_err().is_cancelled());
+
+        assert!(!continuation::is_current_turn_for_owner(&continuation));
+        assert!(!store_compaction(
+            session_id,
+            compaction_attempt,
+            Vec::new()
+        ));
+        server.await.unwrap();
+        websocket::invalidate_codex_websocket_pool_owner(&owner);
+    }
+
+    #[tokio::test]
+    async fn dropping_live_response_body_after_first_chunk_aborts_request_state() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let session_id = "live-response-body-drop-cleanup";
+        let owner = ConversationIdentity::Main(session_id.to_string());
+        continuation::clear_continuation_for_owner(Some(&owner));
+        websocket::invalidate_codex_websocket_pool_owner(&owner);
+        let request = live_test_request("one");
+        let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
+        let compaction_attempt = begin_compaction(session_id, &request.model);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (socket_closed_tx, socket_closed_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let _ = next_live_websocket_request(&mut websocket).await;
+            emit_live_event(
+                &mut websocket,
+                &serde_json::json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"type": "message", "id": "msg-partial"}
+                }),
+            )
+            .await;
+            emit_live_event(
+                &mut websocket,
+                &serde_json::json!({
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "delta": "partial"
+                }),
+            )
+            .await;
+            while websocket.next().await.is_some() {}
+            socket_closed_tx.send(()).unwrap();
+        });
+        let client = authenticated_live_test_client(format!("http://{addr}/responses"));
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            live_stream_response(
+                client,
+                "message".to_string(),
+                &request.model,
+                live_test_context(session_id),
+                request.clone(),
+                continuation.clone(),
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: Some(compaction_attempt),
+                },
+                config::CodexTransport::WebSocket,
+            ),
+        )
+        .await
+        .expect("live response did not publish the first chunk");
+        let mut body = response.into_body();
+        tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+            .await
+            .expect("first downstream chunk timed out")
+            .expect("live response body ended before the first chunk")
+            .expect("first downstream chunk failed");
+        drop(body);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), socket_closed_rx)
+            .await
+            .expect("dropping the downstream body did not close the upstream socket")
+            .expect("socket-close acknowledgement sender dropped");
+        assert!(!continuation::is_current_turn_for_owner(&continuation));
+        assert!(!store_compaction(
+            session_id,
+            compaction_attempt,
+            Vec::new()
+        ));
+        server.await.unwrap();
+        websocket::invalidate_codex_websocket_pool_owner(&owner);
+    }
+
+    #[tokio::test]
+    async fn stale_request_cleanup_preserves_newer_turn_and_compaction_attempt() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let session_id = "stale-live-request-cleanup";
+        let owner = ConversationIdentity::Main(session_id.to_string());
+        continuation::clear_continuation_for_owner(Some(&owner));
+        let request = live_test_request("one");
+        let stale_continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
+        let stale_compaction = begin_compaction(session_id, &request.model);
+        let stale_cleanup = LiveRequestStateCleanup::new(
+            stale_continuation,
+            Some(session_id.to_string()),
+            Some(stale_compaction),
+        );
+
+        let newer_continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
+        let newer_compaction = begin_compaction(session_id, &request.model);
+        drop(stale_cleanup);
+
+        assert!(continuation::is_current_turn_for_owner(&newer_continuation));
+        assert!(store_compaction(session_id, newer_compaction, Vec::new()));
+        abort_request_state(
+            Some(session_id),
+            &newer_continuation,
+            Some(newer_compaction),
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_exhaustion_aborts_live_request_state_after_eleven_attempts() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let status = run_live_failure_case(
+            "live-retry-exhaustion-cleanup",
+            serde_json::json!({
+                "type": "codex.rate_limits",
+                "rate_limits": {
+                    "allowed": false,
+                    "limit_reached": true,
+                    "primary": {"reset_after_seconds": 0}
+                }
+            }),
+            11,
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn excessive_retry_after_aborts_live_request_state() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let status = run_live_failure_case(
+            "live-excessive-retry-after-cleanup",
+            serde_json::json!({
+                "type": "codex.rate_limits",
+                "rate_limits": {
+                    "allowed": false,
+                    "limit_reached": true,
+                    "primary": {"reset_after_seconds": 31}
+                }
+            }),
+            1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn nonretryable_live_error_aborts_request_state() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let status = run_live_failure_case(
+            "live-nonretryable-cleanup",
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "status": "failed",
+                    "error": {"message": "invalid request"}
+                }
+            }),
+            1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_replacement_startup_is_blocked_aborts_request_state() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let session_id = "live-blocked-replacement-cleanup";
+        let owner = ConversationIdentity::Main(session_id.to_string());
+        continuation::clear_continuation_for_owner(Some(&owner));
+        websocket::invalidate_codex_websocket_pool_owner(&owner);
+        let request = live_test_request("one");
+        let continuation = continuation_candidate_for_owner(Some(&owner), &request, true);
+        let compaction_attempt = begin_compaction(session_id, &request.model);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (replacement_accepted_tx, replacement_accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_replacement_tx, release_replacement_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (first_socket, _) = listener.accept().await.unwrap();
+            let mut first_websocket = tokio_tungstenite::accept_async(first_socket).await.unwrap();
+            let _ = next_live_websocket_request(&mut first_websocket).await;
+            emit_live_event(
+                &mut first_websocket,
+                &serde_json::json!({
+                    "type": "codex.rate_limits",
+                    "rate_limits": {
+                        "allowed": false,
+                        "limit_reached": true,
+                        "primary": {"reset_after_seconds": 0}
+                    }
+                }),
+            )
+            .await;
+            drop(first_websocket);
+
+            let (_replacement_socket, _) = listener.accept().await.unwrap();
+            replacement_accepted_tx.send(()).unwrap();
+            let _ = release_replacement_rx.await;
+        });
+        let client = authenticated_live_test_client(format!("http://{addr}/responses"));
+        let task_request = request.clone();
+        let task_continuation = continuation.clone();
+        let response_task = tokio::spawn(async move {
+            let model = task_request.model.clone();
+            live_stream_response(
+                client,
+                "message".to_string(),
+                &model,
+                live_test_context(session_id),
+                task_request,
+                task_continuation,
+                LiveStreamCompaction {
+                    compact_boundary: false,
+                    attempt: Some(compaction_attempt),
+                },
+                config::CodexTransport::WebSocket,
+            )
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), replacement_accepted_rx)
+            .await
+            .expect("replacement startup did not reach the blocked handshake")
+            .expect("replacement startup acknowledgement sender dropped");
+        response_task.abort();
+        assert!(response_task.await.unwrap_err().is_cancelled());
+        let _ = release_replacement_tx.send(());
+        server.await.unwrap();
+
+        assert!(!continuation::is_current_turn_for_owner(&continuation));
+        assert!(!store_compaction(
+            session_id,
+            compaction_attempt,
+            Vec::new()
+        ));
+        websocket::invalidate_codex_websocket_pool_owner(&owner);
     }
 }
