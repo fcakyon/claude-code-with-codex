@@ -26,7 +26,7 @@ your ChatGPT plan, in the same session, and flip between them whenever you want.
 
 ## What you need
 
-- **Claude Code** installed and signed in with a **Claude Pro or Max** plan.
+- **Claude Code 2.1.226 or newer** installed and signed in with a **Claude Pro or Max** plan.
 - A **ChatGPT Plus, Pro, or Team** plan and the **Codex CLI** signed in.
 - **Rust** only if you install from crates.io or source. The prebuilt binary needs nothing.
 
