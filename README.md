@@ -6,7 +6,7 @@
 Use Claude Code with your **Claude subscription and your ChatGPT (Codex)
 subscription at the same time**, and switch between them mid-conversation.
 
-<img src="meta/claude-code-screenshot-2026-07.webp" alt="Claude Code running through the proxy" />
+<img src="https://github.com/fcakyon/claude-code-with-codex/releases/download/v0.3.0/claude-codex-demo.gif" alt="Claude Code running through the proxy" />
 
 It runs as a tiny local proxy. Claude Code already speaks the Anthropic API, so
 the proxy sits in front of it and sends each request to the right place based on
