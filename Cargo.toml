@@ -1,6 +1,6 @@
 [package]
 name = "claude-codex"
-version = "0.3.0"
+version = "0.3.1"
 description = "Run Claude Code on your Claude and ChatGPT subscriptions at once, routed per model name"
 edition = "2024"
 authors = ["Claude Code Proxy contributors"]
