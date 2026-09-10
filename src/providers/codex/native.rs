@@ -19,12 +19,12 @@ use crate::traffic::{
 
 use super::client::{CodexError, CodexHttpClient};
 use super::translate::model_allowlist::{
-    ALLOWED_MODELS, MODEL_ALIASES, assert_allowed_model, full_lane_web_search_model,
-    uses_responses_lite,
+    MODEL_ALIASES, assert_allowed_with_catalog, full_lane_web_search_model, uses_responses_lite,
 };
 
 pub struct CodexNativeBackend {
     client: Arc<CodexHttpClient>,
+    catalog: Arc<crate::model_catalog::ModelCatalog>,
 }
 
 impl Default for CodexNativeBackend {
@@ -34,14 +34,21 @@ impl Default for CodexNativeBackend {
 }
 
 impl CodexNativeBackend {
+    pub fn with_catalog(catalog: Arc<crate::model_catalog::ModelCatalog>) -> Self {
+        Self {
+            catalog,
+            ..Self::new()
+        }
+    }
     pub fn new() -> Self {
         Self {
             client: Arc::new(CodexHttpClient::new()),
+            catalog: Arc::new(crate::model_catalog::ModelCatalog::default()),
         }
     }
 
     pub async fn handle(&self, mut body: Value, ctx: RequestContext) -> Response {
-        let resolved = match shape_native_request(&mut body) {
+        let resolved = match shape_native_request_with_catalog(&mut body, &self.catalog) {
             Ok(resolved) => resolved,
             Err(response) => return response,
         };
@@ -71,6 +78,14 @@ struct NativeResolved {
 
 #[allow(clippy::result_large_err)]
 pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
+    validate_native_request_model_with_catalog(body, &crate::model_catalog::ModelCatalog::default())
+}
+
+#[allow(clippy::result_large_err)]
+pub fn validate_native_request_model_with_catalog(
+    body: &Value,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> Result<String, Response> {
     let object = body.as_object().ok_or_else(|| {
         openai_error(
             StatusCode::BAD_REQUEST,
@@ -94,15 +109,15 @@ pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
                 None,
             )
         })?;
-    let (resolved, _) = resolve_native_model(&requested);
-    if let Err(error) = assert_allowed_model(&resolved) {
+    let (resolved, _) = resolve_native_model_with_catalog(&requested, catalog);
+    if let Err(error) = assert_allowed_with_catalog(&resolved, catalog) {
         return Err(openai_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             format!(
                 "Model '{requested}' resolves to unsupported model '{}'. Supported: {}",
                 error.model,
-                ALLOWED_MODELS.join(", ")
+                catalog.models("codex").join(", ")
             ),
             Some("model"),
             Some("model_not_supported"),
@@ -112,13 +127,22 @@ pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
 }
 
 #[allow(clippy::result_large_err)]
+#[cfg(test)]
 fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
-    let requested = validate_native_request_model(body)?;
+    shape_native_request_with_catalog(body, &crate::model_catalog::ModelCatalog::default())
+}
+
+#[allow(clippy::result_large_err)]
+fn shape_native_request_with_catalog(
+    body: &mut Value,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> Result<NativeResolved, Response> {
+    let requested = validate_native_request_model_with_catalog(body, catalog)?;
     let object = body
         .as_object_mut()
         .expect("validated native Responses body must be an object");
 
-    let (mut model, priority) = resolve_native_model(&requested);
+    let (mut model, priority) = resolve_native_model_with_catalog(&requested, catalog);
 
     let hosted_web_search = has_native_hosted_web_search(object);
     if hosted_web_search {
@@ -139,9 +163,12 @@ fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
     })
 }
 
-fn resolve_native_model(requested: &str) -> (String, bool) {
+fn resolve_native_model_with_catalog(
+    requested: &str,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> (String, bool) {
     let (requested, priority) = match requested.strip_suffix("-fast") {
-        Some(base) if ALLOWED_MODELS.contains(&base) => (base, true),
+        Some(base) if catalog.contains("codex", base) => (base, true),
         _ => (requested, false),
     };
     let model = MODEL_ALIASES
@@ -789,5 +816,24 @@ mod tests {
         assert_eq!(find_sse_boundary(b"data: {}\n\nnext"), Some((8, 2)));
         assert_eq!(find_sse_boundary(b"data: {}\r\n\r\nnext"), Some((8, 4)));
         assert_eq!(find_sse_boundary(b"data: {}"), None);
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    #[test]
+    fn dynamic_native_model_is_preserved_in_upstream_request() {
+        let mut catalog = crate::model_catalog::ModelCatalog::default();
+        catalog.replace("codex", vec!["gpt-toy-discovered".into()]);
+        let mut body = json!({"model":"gpt-toy-discovered-fast", "input":"hello"});
+        let resolved = shape_native_request_with_catalog(&mut body, &catalog).unwrap();
+        assert_eq!(resolved.model, "gpt-toy-discovered");
+        assert_eq!(body["model"], "gpt-toy-discovered");
+        assert_eq!(body["service_tier"], "priority");
+        assert!(
+            validate_native_request_model_with_catalog(&json!({"model":"gpt-5.4"}), &catalog)
+                .is_err()
+        );
     }
 }

@@ -18,18 +18,29 @@ static ALIAS_TARGETS: once_cell::sync::Lazy<HashMap<&'static str, &'static str>>
         m.insert("fable", KIMI_DEFAULT_MODEL);
         m.insert("claude-fable-5", KIMI_DEFAULT_MODEL);
         m.insert("kimi-for-coding", KIMI_DEFAULT_MODEL);
+        m.insert("kimi-k2", KIMI_DEFAULT_MODEL);
+        m.insert("kimi-k2.6", KIMI_DEFAULT_MODEL);
+        m.insert("k2.6", KIMI_DEFAULT_MODEL);
         m.insert("kimi-k3", "k3");
         m.insert("k3", "k3");
         m
     });
 
-const ALLOWED_MODELS: &[&str] = &["kimi-for-coding", "k3"];
-
 pub fn resolve_model(model: &str) -> String {
+    resolve_model_with_catalog(model, &crate::model_catalog::ModelCatalog::default())
+}
+
+pub fn resolve_model_with_catalog(
+    model: &str,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> String {
+    if catalog.contains("kimi", model) {
+        return model.to_string();
+    }
     ALIAS_TARGETS
         .get(model)
         .copied()
-        .unwrap_or(KIMI_DEFAULT_MODEL)
+        .unwrap_or(model)
         .to_string()
 }
 
@@ -38,7 +49,14 @@ pub fn is_k3(model: &str) -> bool {
 }
 
 pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
-    if ALLOWED_MODELS.contains(&model) {
+    assert_allowed_with_catalog(model, &crate::model_catalog::ModelCatalog::default())
+}
+
+pub fn assert_allowed_with_catalog(
+    model: &str,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> Result<(), ModelNotAllowedError> {
+    if catalog.contains("kimi", model) {
         Ok(())
     } else {
         Err(ModelNotAllowedError {
@@ -87,8 +105,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_unknown_to_default() {
-        assert_eq!(resolve_model("unknown-model"), KIMI_DEFAULT_MODEL);
+    fn resolve_unknown_passes_through_for_validation() {
+        assert_eq!(resolve_model("unknown-model"), "unknown-model");
     }
 
     #[test]

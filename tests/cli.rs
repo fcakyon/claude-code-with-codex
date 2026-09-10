@@ -19,7 +19,9 @@ fn version_aliases_print_expected_version() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn models_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
+    let home = TempDir::new()?;
     let mut cmd = Command::cargo_bin("claude-codex")?;
+    isolate_models(&mut cmd, &home);
     cmd.arg("models");
     let out = String::from_utf8(cmd.output()?.stdout)?;
     assert!(out.contains("codex:"));
@@ -27,6 +29,7 @@ fn models_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
     assert!(out.contains("cursor:"));
 
     let mut cmd = Command::cargo_bin("claude-codex")?;
+    isolate_models(&mut cmd, &home);
     cmd.args(["models", "--full"]);
     cmd.output()?;
     Ok(())
@@ -89,7 +92,9 @@ fn provider_logout_without_auth_is_success() -> Result<(), Box<dyn std::error::E
 
 #[test]
 fn models_output_is_stable_order() -> Result<(), Box<dyn std::error::Error>> {
+    let home = TempDir::new()?;
     let mut cmd = Command::cargo_bin("claude-codex")?;
+    isolate_models(&mut cmd, &home);
     cmd.args(["models", "--full"]);
     let output = cmd.output()?;
     let out = String::from_utf8(output.stdout)?;
@@ -114,5 +119,57 @@ fn kimi_auth_status_reads_stored_auth() -> Result<(), Box<dyn std::error::Error>
     cmd.args(["kimi", "auth", "status"]);
     cmd.env("CCP_CONFIG_DIR", temp.path());
     cmd.assert().success().stdout(contains("User: u"));
+    Ok(())
+}
+
+fn isolate_models(cmd: &mut Command, home: &TempDir) {
+    cmd.env("HOME", home.path())
+        .env("CCP_CONFIG_DIR", home.path().join("config"))
+        .env("CCP_CODEX_AUTH_FILE", home.path().join("auth.json"))
+        .env("XDG_STATE_HOME", home.path().join("state"));
+}
+
+#[test]
+fn models_refreshes_from_native_codex_and_reuses_cache_offline()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let home = TempDir::new()?;
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"tokens":{"access_token":"toy-token","refresh_token":"toy-refresh","account_id":"toy-account"}}"#,
+    )?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = format!("http://{}/responses", listener.local_addr()?);
+    let upstream = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0);
+            request.extend_from_slice(&buf[..n]);
+        }
+        let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("get /models?client_version="));
+        assert!(request.contains("authorization: bearer toy-token"));
+        assert!(request.contains("chatgpt-account-id: toy-account"));
+        let body = r#"{"models":[{"slug":"gpt-toy-discovered"}]}"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+    for _ in 0..2 {
+        let mut cmd = Command::cargo_bin("claude-codex")?;
+        isolate_models(&mut cmd, &home);
+        cmd.env("CCP_CODEX_BASE_URL", &endpoint)
+            .env("NO_PROXY", "127.0.0.1")
+            .args(["models", "--full"])
+            .assert()
+            .success()
+            .stdout(contains("gpt-toy-discovered-fast"));
+    }
+    upstream.join().unwrap();
     Ok(())
 }

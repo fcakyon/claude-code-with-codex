@@ -1,3 +1,4 @@
+use crate::model_catalog::ModelCatalog;
 pub mod auth;
 pub mod chat_completions;
 pub mod client;
@@ -29,7 +30,6 @@ use crate::config;
 use crate::logging::create_logger;
 use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
-use crate::registry;
 use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
 
@@ -47,7 +47,7 @@ use self::count_tokens::count_translated_tokens;
 use self::translate::accumulate::accumulate_response_with_traffic;
 use self::translate::live_stream::LiveStreamTranslator;
 use self::translate::model_allowlist::{
-    assert_allowed_model, full_lane_web_search_model, resolve_model_request_with_config_override,
+    assert_allowed_with_catalog, full_lane_web_search_model, resolve_model_with_catalog,
     uses_responses_lite,
 };
 use self::translate::reducer::finish_metadata_from_upstream;
@@ -70,6 +70,7 @@ pub(crate) fn clear_session_compaction(session_id: &str) {
 }
 
 pub struct CodexProvider {
+    catalog: Arc<ModelCatalog>,
     client: Arc<CodexHttpClient>,
 }
 
@@ -80,8 +81,16 @@ impl Default for CodexProvider {
 }
 
 impl CodexProvider {
+    pub fn with_catalog(catalog: std::sync::Arc<ModelCatalog>) -> Self {
+        Self {
+            catalog,
+            ..Self::new()
+        }
+    }
+
     pub fn new() -> Self {
         Self {
+            catalog: Arc::new(ModelCatalog::default()),
             client: Arc::new(CodexHttpClient::new()),
         }
     }
@@ -99,8 +108,8 @@ impl CodexProvider {
         let model = body.model.as_deref().unwrap_or("gpt-5.6-sol");
 
         let mut resolved =
-            resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
-        if let Err(e) = assert_allowed_model(&resolved.model) {
+            resolve_model_with_catalog(model, !body.bypass_provider_model_override, &self.catalog);
+        if let Err(e) = assert_allowed_with_catalog(&resolved.model, &self.catalog) {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -509,16 +518,7 @@ impl Provider for CodexProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        let mut models: Vec<String> = registry::CODEX_MODELS
-            .iter()
-            .map(|m| m.to_string())
-            .collect();
-        for m in registry::CODEX_MODELS {
-            models.push(format!("{m}-fast"));
-        }
-        models.sort_unstable();
-        models.dedup();
-        models
+        self.catalog.listed_models("codex")
     }
 
     fn cli(&self) -> &'static dyn CliHandlers {
@@ -542,8 +542,8 @@ impl Provider for CodexProvider {
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let model = body.model.as_deref().unwrap_or("gpt-5.6-sol");
         let mut resolved =
-            resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
-        if let Err(e) = assert_allowed_model(&resolved.model) {
+            resolve_model_with_catalog(model, !body.bypass_provider_model_override, &self.catalog);
+        if let Err(e) = assert_allowed_with_catalog(&resolved.model, &self.catalog) {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",

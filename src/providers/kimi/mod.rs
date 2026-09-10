@@ -1,3 +1,4 @@
+use crate::model_catalog::ModelCatalog;
 pub mod auth;
 pub mod client;
 pub mod count_tokens;
@@ -18,10 +19,13 @@ use crate::provider::{
 };
 use crate::providers::kimi::auth::token_store::file_store;
 use crate::providers::kimi::translate::accumulate::accumulate_response;
-use crate::providers::kimi::translate::model_allowlist::{assert_allowed_model, resolve_model};
-use crate::providers::kimi::translate::request::{TranslateOptions, translate_request};
+use crate::providers::kimi::translate::model_allowlist::{
+    assert_allowed_with_catalog, resolve_model_with_catalog,
+};
+use crate::providers::kimi::translate::request::{
+    TranslateOptions, translate_request_with_catalog,
+};
 use crate::providers::kimi::translate::stream::translate_stream_bytes;
-use crate::registry::KIMI_MODELS;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -30,7 +34,9 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-pub struct KimiProvider;
+pub struct KimiProvider {
+    catalog: std::sync::Arc<ModelCatalog>,
+}
 
 impl Default for KimiProvider {
     fn default() -> Self {
@@ -39,8 +45,14 @@ impl Default for KimiProvider {
 }
 
 impl KimiProvider {
+    pub fn with_catalog(catalog: std::sync::Arc<ModelCatalog>) -> Self {
+        Self { catalog }
+    }
+
     pub fn new() -> Self {
-        Self
+        Self {
+            catalog: std::sync::Arc::new(ModelCatalog::default()),
+        }
     }
 }
 
@@ -51,7 +63,7 @@ impl Provider for KimiProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        KIMI_MODELS.iter().map(|s| s.to_string()).collect()
+        self.catalog.listed_models("kimi")
     }
 
     fn cli(&self) -> &'static dyn CliHandlers {
@@ -62,9 +74,9 @@ impl Provider for KimiProvider {
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let want_stream = body.stream;
         let model = body.model.as_deref().unwrap_or("kimi-for-coding");
-        let resolved = resolve_model(model);
+        let resolved = resolve_model_with_catalog(model, &self.catalog);
 
-        if let Err(e) = assert_allowed_model(&resolved) {
+        if let Err(e) = assert_allowed_with_catalog(&resolved, &self.catalog) {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -78,7 +90,8 @@ impl Provider for KimiProvider {
             monitor.model_resolved(&ctx.req_id, &resolved);
         }
 
-        let translated = match translate_request(
+        let translated = match translate_request_with_catalog(
+            &self.catalog,
             &body,
             TranslateOptions {
                 session_id: ctx.session_id.clone(),
@@ -172,9 +185,16 @@ impl Provider for KimiProvider {
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let model = body.model.as_deref().unwrap_or("kimi-for-coding");
-        let resolved = resolve_model(model);
+        let resolved = resolve_model_with_catalog(model, &self.catalog);
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved);
+        }
+        if let Err(error) = assert_allowed_with_catalog(&resolved, &self.catalog) {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                error.to_string(),
+            );
         }
         let tokens = count_tokens::count_tokens(&body);
         if let Some(monitor) = ctx.monitor.as_ref() {
@@ -199,8 +219,8 @@ impl Provider for KimiProvider {
             .model
             .clone()
             .unwrap_or_else(|| "kimi-for-coding".to_string());
-        let resolved = resolve_model(&requested);
-        assert_allowed_model(&resolved).map_err(|error| {
+        let resolved = resolve_model_with_catalog(&requested, &self.catalog);
+        assert_allowed_with_catalog(&resolved, &self.catalog).map_err(|error| {
             ProviderError::new(
                 StatusCode::BAD_REQUEST,
                 ProviderErrorKind::InvalidRequest,
@@ -213,7 +233,8 @@ impl Provider for KimiProvider {
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.model_resolved(&ctx.req_id, &resolved);
         }
-        let translated = translate_request(
+        let translated = translate_request_with_catalog(
+            &self.catalog,
             &body,
             TranslateOptions {
                 session_id: ctx.session_id.clone(),

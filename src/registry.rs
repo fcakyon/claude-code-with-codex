@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use axum::{http::StatusCode, response::Response};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
@@ -54,12 +54,30 @@ pub(crate) const GROK_MODELS: &[&str] = &["grok-composer-2.5-fast", "grok-4.5"];
 
 pub struct Registry {
     alias_provider: AliasProvider,
+    pub(crate) catalog: Arc<crate::model_catalog::ModelCatalog>,
     models: BTreeMap<String, Vec<String>>,
     handlers: BTreeMap<String, Arc<dyn Provider>>,
 }
 
 impl Registry {
     pub fn new(alias_provider: AliasProvider) -> Self {
+        Self::with_catalog(
+            alias_provider,
+            Arc::new(crate::model_catalog::ModelCatalog::default()),
+        )
+    }
+
+    pub async fn discover() -> Self {
+        Self::with_catalog(
+            crate::config::alias_provider(),
+            Arc::new(crate::model_discovery::discover().await),
+        )
+    }
+
+    pub fn with_catalog(
+        alias_provider: AliasProvider,
+        catalog: Arc<crate::model_catalog::ModelCatalog>,
+    ) -> Self {
         let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
         models.insert(
             "anthropic".into(),
@@ -68,27 +86,24 @@ impl Registry {
                 .map(|alias| (*alias).to_string())
                 .collect(),
         );
-        models.insert("codex".into(), expand_codex_models());
-        models.insert(
-            "kimi".into(),
-            KIMI_MODELS.iter().map(|m| (*m).to_string()).collect(),
-        );
+        models.insert("codex".into(), catalog.listed_models("codex"));
+        models.insert("kimi".into(), catalog.listed_models("kimi"));
         models.insert("cursor".into(), build_cursor_models());
-        models.insert(
-            "grok".into(),
-            GROK_MODELS
-                .iter()
-                .map(|model| (*model).to_string())
-                .collect(),
-        );
+        models.insert("grok".into(), catalog.listed_models("grok"));
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
             let handler: Arc<dyn Provider> = match name.as_str() {
                 "anthropic" => Arc::new(crate::providers::anthropic::AnthropicProvider::new()),
-                "codex" => Arc::new(crate::providers::codex::CodexProvider::new()),
-                "kimi" => Arc::new(crate::providers::kimi::KimiProvider::new()),
+                "codex" => Arc::new(crate::providers::codex::CodexProvider::with_catalog(
+                    catalog.clone(),
+                )),
+                "kimi" => Arc::new(crate::providers::kimi::KimiProvider::with_catalog(
+                    catalog.clone(),
+                )),
                 "cursor" => Arc::new(crate::providers::cursor::CursorProvider::new()),
-                "grok" => Arc::new(crate::providers::grok::GrokProvider::new()),
+                "grok" => Arc::new(crate::providers::grok::GrokProvider::with_catalog(
+                    catalog.clone(),
+                )),
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
             };
             handlers.insert(name.clone(), handler);
@@ -96,6 +111,7 @@ impl Registry {
 
         Self {
             alias_provider,
+            catalog,
             models,
             handlers,
         }
@@ -109,6 +125,7 @@ impl Registry {
         alias_provider: AliasProvider,
         providers: impl IntoIterator<Item = Arc<dyn Provider>>,
     ) -> Self {
+        let catalog = Arc::new(crate::model_catalog::ModelCatalog::default());
         let mut models = BTreeMap::new();
         let mut handlers = BTreeMap::new();
         for provider in providers {
@@ -118,6 +135,7 @@ impl Registry {
         }
         Self {
             alias_provider,
+            catalog,
             models,
             handlers,
         }
@@ -324,22 +342,6 @@ const CODEX_CLI: PlaceholderCli = PlaceholderCli { provider: "codex" };
 const KIMI_CLI: PlaceholderCli = PlaceholderCli { provider: "kimi" };
 const CURSOR_CLI: PlaceholderCli = PlaceholderCli { provider: "cursor" };
 const GROK_CLI: PlaceholderCli = PlaceholderCli { provider: "grok" };
-fn expand_codex_models() -> Vec<String> {
-    let mut set = HashSet::new();
-    let mut out = Vec::new();
-    for model in CODEX_MODELS {
-        if set.insert((*model).to_string()) {
-            out.push((*model).to_string());
-        }
-        let fast = format!("{model}-fast");
-        if set.insert(fast.clone()) {
-            out.push(fast);
-        }
-    }
-    out.sort_unstable();
-    out
-}
-
 fn build_cursor_models() -> Vec<String> {
     let mut out: Vec<String> = CURSOR_LEGACY_MODELS
         .iter()

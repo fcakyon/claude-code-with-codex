@@ -3,7 +3,14 @@ pub fn resolve_model(model: &str) -> String {
 }
 
 pub fn assert_allowed_model(model: &str) -> anyhow::Result<()> {
-    if matches!(model, "grok-composer-2.5-fast" | "grok-4.5") {
+    assert_allowed_with_catalog(model, &crate::model_catalog::ModelCatalog::default())
+}
+
+pub fn assert_allowed_with_catalog(
+    model: &str,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> anyhow::Result<()> {
+    if catalog.contains("grok", model) {
         Ok(())
     } else {
         anyhow::bail!("unsupported Grok model")

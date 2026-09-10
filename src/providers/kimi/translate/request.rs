@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::model_allowlist::{KIMI_DEFAULT_MODEL, assert_allowed_model, is_k3, resolve_model};
+use super::model_allowlist::{
+    KIMI_DEFAULT_MODEL, assert_allowed_with_catalog, is_k3, resolve_model_with_catalog,
+};
 use crate::anthropic::schema::MessagesRequest;
 use crate::providers::translate_shared::{
     ContentBlock, flatten_system_text, image_block_to_url, image_source_to_url, normalize_content,
@@ -132,9 +134,17 @@ pub fn translate_request(
     req: &MessagesRequest,
     opts: TranslateOptions,
 ) -> Result<KimiChatRequest, anyhow::Error> {
+    translate_request_with_catalog(&crate::model_catalog::ModelCatalog::default(), req, opts)
+}
+
+pub fn translate_request_with_catalog(
+    catalog: &crate::model_catalog::ModelCatalog,
+    req: &MessagesRequest,
+    opts: TranslateOptions,
+) -> Result<KimiChatRequest, anyhow::Error> {
     let model = req.model.as_deref().unwrap_or(KIMI_DEFAULT_MODEL);
-    let resolved = resolve_model(model);
-    assert_allowed_model(&resolved).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let resolved = resolve_model_with_catalog(model, catalog);
+    assert_allowed_with_catalog(&resolved, catalog).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let k3 = is_k3(&resolved);
     let messages = build_messages(req, &resolved)?;
@@ -1169,5 +1179,20 @@ mod tests {
         .unwrap();
         let translated = translate_request(&req, TranslateOptions { session_id: None }).unwrap();
         assert_eq!(translated.max_tokens, 1_048_576);
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    #[test]
+    fn newly_discovered_model_is_not_rewritten_to_default() {
+        let mut catalog = crate::model_catalog::ModelCatalog::default();
+        catalog.replace("kimi", vec!["kimi-toy-discovered".into()]);
+        let req = serde_json::from_value(serde_json::json!({"model":"kimi-toy-discovered","messages":[{"role":"user","content":"hello"}],"max_tokens":100})).unwrap();
+        let translated =
+            translate_request_with_catalog(&catalog, &req, TranslateOptions { session_id: None })
+                .unwrap();
+        assert_eq!(translated.model, "kimi-toy-discovered");
     }
 }

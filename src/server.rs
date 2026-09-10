@@ -10,14 +10,15 @@ use crate::{
     project,
     provider::RequestContext,
     providers::codex::{
-        chat_completions::{ChatCompletionsBackend, request::translate_request},
+        chat_completions::{ChatCompletionsBackend, request::translate_request_with_catalog},
         images::{
             CodexImagesBackend, ImageOperation, ImageRequestError, MAX_EDIT_REQUEST_BYTES,
             MAX_GENERATION_REQUEST_BYTES, MultipartEditInput, UploadedImage, image_error_response,
             prepare_json_request, prepare_multipart_edit,
         },
         native::{
-            CodexNativeBackend, NativeResponseOutcome, openai_error, validate_native_request_model,
+            CodexNativeBackend, NativeResponseOutcome, openai_error,
+            validate_native_request_model_with_catalog,
         },
         transcription::{
             CodexTranscriptionBackend, MAX_TRANSCRIPTION_REQUEST_BYTES, TranscriptionRequestError,
@@ -147,6 +148,16 @@ pub async fn serve_listener(
     monitor: Option<MonitorHandle>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    let registry = Arc::new(Registry::discover().await);
+    serve_listener_with_registry(listener, monitor, registry, shutdown).await
+}
+
+pub async fn serve_listener_with_registry(
+    listener: TcpListener,
+    monitor: Option<MonitorHandle>,
+    registry: Arc<Registry>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     let local_addr = listener.local_addr()?;
     let port = local_addr.port();
     create_logger("server").info(
@@ -167,7 +178,7 @@ pub async fn serve_listener(
             ),
         ])),
     );
-    let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
+    let app = app_with_monitor(registry, monitor);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await?;
@@ -228,7 +239,7 @@ pub fn app_with_features(
 ) -> Router {
     let native_responses = features
         .responses_api
-        .then(|| Arc::new(CodexNativeBackend::new()));
+        .then(|| Arc::new(CodexNativeBackend::with_catalog(registry.catalog.clone())));
     let chat_completions = features
         .responses_api
         .then(|| Arc::new(ChatCompletionsBackend::new()));
@@ -909,7 +920,9 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         return monitor_response_body(response, request_guard);
     };
     let parsed = if provider.name() == "codex" {
-        if let Err(response) = validate_native_request_model(&body) {
+        if let Err(response) =
+            validate_native_request_model_with_catalog(&body, &state.registry.catalog)
+        {
             return monitor_response_body(response, request_guard);
         }
         None
@@ -1142,7 +1155,8 @@ async fn handler_chat_completions(
         return monitor_response_body(response, request_guard);
     };
     let (translated, parsed) = if provider.name() == "codex" {
-        let translated = match translate_request(body.clone()) {
+        let translated = match translate_request_with_catalog(body.clone(), &state.registry.catalog)
+        {
             Ok(translated) => translated,
             Err(error) => return monitor_response_body(error.response(), request_guard),
         };

@@ -1,3 +1,4 @@
+use crate::model_catalog::ModelCatalog;
 pub mod auth;
 pub mod client;
 pub mod count_tokens;
@@ -26,23 +27,32 @@ use crate::provider::{
     CliHandlers, Generation, GenerationBody, Provider, ProviderError, ProviderErrorKind,
     RequestContext,
 };
-use crate::{registry::GROK_MODELS, traffic::StreamTrafficCapture};
+use crate::traffic::StreamTrafficCapture;
 
 use self::auth::token_store::file_store;
 use self::translate::{
     accumulate::accumulate_response_with_traffic,
-    model_allowlist::{assert_allowed_model, resolve_model},
+    model_allowlist::{assert_allowed_with_catalog, resolve_model},
     request::translate_request,
     stream::{SseDecoder, StreamTranslator, stream_error},
 };
 
 pub struct GrokProvider {
+    catalog: Arc<ModelCatalog>,
     client: Arc<client::GrokClient>,
 }
 impl GrokProvider {
+    pub fn with_catalog(catalog: std::sync::Arc<ModelCatalog>) -> Self {
+        Self {
+            catalog,
+            ..Self::new()
+        }
+    }
+
     pub fn new() -> Self {
         crate::config::warn_grok_tool_image_mode_once(&crate::logging::create_logger("grok"));
         Self {
+            catalog: Arc::new(ModelCatalog::default()),
             client: Arc::new(
                 client::GrokClient::new(
                     crate::config::grok_base_url(),
@@ -55,6 +65,7 @@ impl GrokProvider {
 
     pub fn with_client(client: client::GrokClient) -> Self {
         Self {
+            catalog: Arc::new(ModelCatalog::default()),
             client: Arc::new(client),
         }
     }
@@ -71,18 +82,16 @@ impl Provider for GrokProvider {
         "grok"
     }
     fn supported_models(&self) -> Vec<String> {
-        GROK_MODELS
-            .iter()
-            .map(|model| (*model).to_string())
-            .collect()
+        self.catalog.listed_models("grok")
     }
+
     fn cli(&self) -> &'static dyn CliHandlers {
         &GROK_CLI
     }
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);
-        if let Err(error) = assert_allowed_model(&resolved) {
+        if let Err(error) = assert_allowed_with_catalog(&resolved, &self.catalog) {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -161,7 +170,7 @@ impl Provider for GrokProvider {
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);
-        if let Err(error) = assert_allowed_model(&resolved) {
+        if let Err(error) = assert_allowed_with_catalog(&resolved, &self.catalog) {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
@@ -199,7 +208,7 @@ impl Provider for GrokProvider {
         body.stream = true;
         let requested = body.model.clone().unwrap_or_else(|| "grok-4.5".into());
         let resolved = resolve_model(&requested);
-        assert_allowed_model(&resolved).map_err(|error| {
+        assert_allowed_with_catalog(&resolved, &self.catalog).map_err(|error| {
             ProviderError::new(
                 StatusCode::BAD_REQUEST,
                 ProviderErrorKind::InvalidRequest,

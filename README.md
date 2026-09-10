@@ -89,6 +89,29 @@ the suffix before sending the model name to Codex.
 - **For one new session.** Set `ANTHROPIC_MODEL` when launching Claude Code.
 - **List what is available.** `claude-codex models`.
 
+On startup, and when running `claude-codex models`, the proxy refreshes the Codex,
+Kimi, and Grok model catalogues concurrently using their existing subscription
+credentials. Discovery waits at most five seconds for upstream responses. The
+same catalogue drives listings, routing, and request validation, including Codex
+`-fast` aliases. Kimi model IDs returned by discovery are sent unchanged.
+
+Successful catalogues are cached under `<config_dir>/cache/models/` (normally
+`~/.config/claude-code-proxy/cache/models/`; `CCP_CONFIG_DIR` overrides the config
+directory). Cache entries are scoped to the account and upstream endpoint and
+contain no credentials. Each startup attempts a refresh; network errors, rejected
+credentials, or invalid responses use the last successful matching cache, then
+bundled models if no usable cache exists. Existing request-time authentication
+refresh remains in place. Cache write failures do not prevent startup. Delete the
+cache directory to clear it.
+
+A successful refresh replaces the concrete model list. Existing convenience
+aliases retain their target mappings; if an alias target is no longer available,
+select an available model explicitly. Cursor retains its bundled aliases and
+explicit `cursor:<id>`, `cursor-plan:<id>`, and `cursor-ask:<id>` routing because
+native catalogue discovery is not implemented for that backend. Anthropic keeps
+its aliases and `claude-*` passthrough because its credentials arrive with each
+request. No additional provider CLI is required.
+
 Reasoning is carried across a switch. When you move a conversation from one plan
 to the other, the earlier turn's thinking is kept and shown to the next model as
 plain tagged text, so context is not lost.

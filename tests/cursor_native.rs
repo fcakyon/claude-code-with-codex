@@ -1001,9 +1001,14 @@ async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
     let proxy_addr = proxy_listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let _proxy_handle = tokio::spawn(async move {
-        claude_codex::server::serve_listener(proxy_listener, None, async move {
-            let _ = shutdown_rx.await;
-        })
+        claude_codex::server::serve_listener_with_registry(
+            proxy_listener,
+            None,
+            std::sync::Arc::new(claude_codex::Registry::with_default_alias()),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
         .await
         .unwrap();
     });

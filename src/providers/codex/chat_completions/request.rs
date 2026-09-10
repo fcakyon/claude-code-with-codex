@@ -3,7 +3,7 @@ use serde_json::{Map, Value, json};
 
 use crate::providers::codex::translate::{
     model_allowlist::{
-        ALLOWED_MODELS, assert_allowed_model, resolve_model_request, uses_responses_lite,
+        assert_allowed_with_catalog, resolve_model_with_catalog, uses_responses_lite,
     },
     request::{Effort, resolve_effort_override, to_codex_effort},
 };
@@ -42,6 +42,25 @@ fn translate_request_with_override(
     body: Value,
     effort_override: Option<&str>,
 ) -> Result<TranslatedRequest, ChatError> {
+    translate_request_with_catalog_and_override(
+        body,
+        effort_override,
+        &crate::model_catalog::ModelCatalog::default(),
+    )
+}
+
+pub fn translate_request_with_catalog(
+    body: Value,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> Result<TranslatedRequest, ChatError> {
+    translate_request_with_catalog_and_override(body, config::codex_effort().as_deref(), catalog)
+}
+
+fn translate_request_with_catalog_and_override(
+    body: Value,
+    effort_override: Option<&str>,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> Result<TranslatedRequest, ChatError> {
     let object = body
         .as_object()
         .ok_or_else(|| ChatError::invalid("Request body must be a JSON object", None, None))?;
@@ -49,13 +68,13 @@ fn translate_request_with_override(
 
     let requested_model = required_string(object, "model")?;
     let normalized = normalize_incoming_model(&requested_model);
-    let resolved = resolve_model_request(&normalized);
-    assert_allowed_model(&resolved.model).map_err(|error| {
+    let resolved = resolve_model_with_catalog(&normalized, true, catalog);
+    assert_allowed_with_catalog(&resolved.model, catalog).map_err(|error| {
         ChatError::invalid(
             format!(
                 "Model '{requested_model}' resolves to unsupported model '{}'. Supported: {}",
                 error.model,
-                ALLOWED_MODELS.join(", ")
+                catalog.models("codex").join(", ")
             ),
             Some("model"),
             Some("model_not_supported"),
@@ -545,5 +564,18 @@ mod tests {
         let translated = translate_request(full).unwrap();
         assert_eq!(translated.upstream["temperature"], 0.2);
         assert_eq!(translated.upstream["top_p"], 0.9);
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    #[test]
+    fn dynamic_model_is_preserved_in_upstream_request() {
+        let mut catalog = crate::model_catalog::ModelCatalog::default();
+        catalog.replace("codex", vec!["gpt-toy-discovered".into()]);
+        let translated = translate_request_with_catalog_and_override(json!({"model":"gpt-toy-discovered-fast","messages":[{"role":"user","content":"hello"}]}), None, &catalog).unwrap();
+        assert_eq!(translated.upstream["model"], "gpt-toy-discovered");
+        assert_eq!(translated.upstream["service_tier"], "priority");
     }
 }

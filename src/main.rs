@@ -5,7 +5,7 @@ use claude_codex::{
     monitor::MonitorHandle,
     paths,
     registry::{ANTHROPIC_STYLE_ALIASES, Registry},
-    server::{self, ServerConfig},
+    server,
     tui::{self, MonitorExit, MonitorUiConfig},
 };
 use std::io::IsTerminal;
@@ -97,20 +97,24 @@ fn main() -> Result<()> {
         Commands::Serve { port, no_monitor } => {
             let bind_address = config::bind_address();
             let effective_port = port.unwrap_or_else(config::port);
-            let registry = Registry::with_default_alias();
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
+            let registry = std::sync::Arc::new(runtime.block_on(Registry::discover()));
             match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
                 ServeMode::Plain => {
                     print_server_banner(&bind_address, effective_port, &registry);
-                    runtime
-                        .block_on(server::serve(ServerConfig {
-                            bind_address,
-                            port: effective_port,
-                            monitor: None,
-                        }))
-                        .map_err(|err| anyhow::anyhow!(err))
+                    runtime.block_on(async {
+                        let listener =
+                            server::bind_proxy_listener(&bind_address, effective_port).await?;
+                        server::serve_listener_with_registry(
+                            listener,
+                            None,
+                            registry,
+                            std::future::pending::<()>(),
+                        )
+                        .await
+                    })
                 }
                 ServeMode::Monitor => {
                     let _stderr_guard = logging::suppress_stderr();
@@ -123,12 +127,17 @@ fn main() -> Result<()> {
                     let monitor_listen_url =
                         listen_url(&local_addr.ip().to_string(), local_addr.port());
                     let server_monitor = monitor.clone();
+                    let server_registry = registry.clone();
                     let server_task = runtime.spawn(async move {
-                        let result =
-                            server::serve_listener(listener, Some(server_monitor), async move {
+                        let result = server::serve_listener_with_registry(
+                            listener,
+                            Some(server_monitor),
+                            server_registry,
+                            async move {
                                 let _ = shutdown_rx.await;
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                         let _ = shutdown_complete_tx.send(());
                         result
                     });
@@ -158,7 +167,10 @@ fn main() -> Result<()> {
             tui::run_mock_monitor(config::port(), &registry)
         }
         Commands::Models { full } => {
-            print_models(&Registry::with_default_alias(), full);
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            print_models(&runtime.block_on(Registry::discover()), full);
             Ok(())
         }
         Commands::Codex { command } => run_provider_cli("codex", command),

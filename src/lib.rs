@@ -2,6 +2,8 @@ pub mod anthropic;
 pub mod auth;
 pub mod config;
 pub mod logging;
+pub mod model_catalog;
+pub mod model_discovery;
 pub mod monitor;
 pub mod openai_compat;
 pub mod paths;

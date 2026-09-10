@@ -643,9 +643,14 @@ impl TestHarness {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_address = listener.local_addr().unwrap();
         let (server_shutdown, shutdown) = oneshot::channel();
-        let server_task = tokio::spawn(server::serve_listener(listener, None, async move {
-            let _ = shutdown.await;
-        }));
+        let server_task = tokio::spawn(server::serve_listener_with_registry(
+            listener,
+            None,
+            std::sync::Arc::new(claude_codex::Registry::with_default_alias()),
+            async move {
+                let _ = shutdown.await;
+            },
+        ));
         let client = reqwest::Client::builder()
             .http1_only()
             .no_proxy()

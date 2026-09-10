@@ -4,17 +4,7 @@ use crate::config;
 
 use super::request::ServiceTier;
 
-pub const ALLOWED_MODELS: &[&str] = &[
-    "gpt-5.2",
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.5",
-    "gpt-5.6-luna",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-];
+pub const ALLOWED_MODELS: &[&str] = crate::registry::CODEX_MODELS;
 
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("haiku", "gpt-5.6-luna"),
@@ -41,10 +31,15 @@ fn fast_model_aliases() -> HashSet<String> {
     ALLOWED_MODELS.iter().map(|m| format!("{m}-fast")).collect()
 }
 
-fn resolve_fast_model_alias(model: &str) -> ResolvedModel {
-    let fast_set = fast_model_aliases();
-    if fast_set.contains(model) {
-        let base = model.trim_end_matches("-fast");
+fn resolve_fast_model_alias(
+    model: &str,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> ResolvedModel {
+    if model
+        .strip_suffix("-fast")
+        .is_some_and(|base| catalog.contains("codex", base))
+    {
+        let base = model.strip_suffix("-fast").expect("checked fast alias");
         ResolvedModel {
             model: base.to_string(),
             service_tier: Some(ServiceTier::Priority),
@@ -65,17 +60,29 @@ pub fn resolve_model_request_with_config_override(
     model: &str,
     apply_config_override: bool,
 ) -> ResolvedModel {
+    resolve_model_with_catalog(
+        model,
+        apply_config_override,
+        &crate::model_catalog::ModelCatalog::default(),
+    )
+}
+
+pub fn resolve_model_with_catalog(
+    model: &str,
+    apply_config_override: bool,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> ResolvedModel {
     let alias = MODEL_ALIASES
         .iter()
         .find(|(alias, _)| *alias == model)
         .map(|(_, target)| *target)
         .unwrap_or(model);
 
-    let requested = resolve_fast_model_alias(alias);
+    let requested = resolve_fast_model_alias(alias, catalog);
 
     let override_model = apply_config_override.then(config::codex_model).flatten();
     let resolved = match override_model {
-        Some(ref val) if !val.is_empty() => resolve_fast_model_alias(val),
+        Some(ref val) if !val.is_empty() => resolve_fast_model_alias(val, catalog),
         _ => requested.clone(),
     };
 
@@ -107,7 +114,14 @@ impl std::fmt::Display for ModelNotAllowedError {
 }
 
 pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
-    if ALLOWED_MODELS.contains(&model) {
+    assert_allowed_with_catalog(model, &crate::model_catalog::ModelCatalog::default())
+}
+
+pub fn assert_allowed_with_catalog(
+    model: &str,
+    catalog: &crate::model_catalog::ModelCatalog,
+) -> Result<(), ModelNotAllowedError> {
+    if catalog.contains("codex", model) {
         Ok(())
     } else {
         Err(ModelNotAllowedError {
