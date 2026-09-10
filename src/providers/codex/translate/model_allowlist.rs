@@ -5,6 +5,7 @@ use crate::config;
 use super::request::ServiceTier;
 
 pub const ALLOWED_MODELS: &[&str] = &[
+    "gpt-6-astra",
     "gpt-5.2",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
@@ -27,8 +28,8 @@ pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("claude-opus-4-7", "gpt-5.6-sol"),
     ("claude-opus-4-8", "gpt-5.6-sol"),
     ("claude-opus-5", "gpt-5.6-sol"),
-    ("fable", "gpt-5.6-sol"),
-    ("claude-fable-5", "gpt-5.6-sol"),
+    ("fable", "gpt-6-astra"),
+    ("claude-fable-5", "gpt-6-astra"),
 ];
 
 #[derive(Debug, Clone)]
@@ -188,10 +189,10 @@ mod tests {
     }
 
     #[test]
-    fn fable_5_resolves_to_sol() {
+    fn fable_5_resolves_to_astra() {
         for model in ["fable", "claude-fable-5"] {
             let r = resolve_model_request(model);
-            assert_eq!(r.model, "gpt-5.6-sol");
+            assert_eq!(r.model, "gpt-6-astra");
         }
     }
 
