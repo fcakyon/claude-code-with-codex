@@ -90,7 +90,9 @@ the suffix before sending the model name to Codex.
 - **List what is available.** `claude-codex models`.
 - **New Codex models.** Any model the Codex CLI lists in
   `~/.codex/models_cache.json` is accepted too, so run `codex` once after your
-  plan gains a model and it shows up without an update.
+  plan gains a model and it shows up without an update. When a Claude alias is
+  sent to Codex, it picks the first of its preferred models that your catalog
+  lists.
 
 Reasoning is carried across a switch. When you move a conversation from one plan
 to the other, the earlier turn's thinking is kept and shown to the next model as

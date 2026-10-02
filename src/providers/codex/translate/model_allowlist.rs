@@ -24,24 +24,30 @@ const BUNDLED_MODELS: &[&str] = &[
     "gpt-6.1-sol",
 ];
 
-/// Models the Codex backend accepts: the bundled list plus whatever the Codex
-/// CLI last fetched into `models_cache.json` next to `auth.json`, so a model the
-/// account gains is usable without a release. Hidden and API-less entries stay
-/// out.
+/// Listed, API-capable slugs the Codex CLI last fetched for this account into
+/// `models_cache.json` next to `auth.json`. Empty without a cache, and in unit
+/// tests so they never depend on the developer's account.
+static CLI_MODELS: Lazy<Vec<String>> = Lazy::new(|| {
+    if cfg!(test) {
+        return Vec::new();
+    }
+    std::fs::read(codex_auth_file().with_file_name("models_cache.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .as_ref()
+        .and_then(|cache| cache["models"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"] == "list" && m["supported_in_api"] == true)
+        .filter_map(|m| m["slug"].as_str().map(str::to_string))
+        .collect()
+});
+
+/// Models the Codex backend accepts: the bundled list plus the account's CLI
+/// catalog, so a model the account gains is usable without a release.
 pub static ALLOWED_MODELS: Lazy<Vec<String>> = Lazy::new(|| {
     let mut models: Vec<String> = BUNDLED_MODELS.iter().map(|m| m.to_string()).collect();
-    let cache = std::fs::read(codex_auth_file().with_file_name("models_cache.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    models.extend(
-        cache
-            .as_ref()
-            .and_then(|cache| cache["models"].as_array())
-            .into_iter()
-            .flatten()
-            .filter(|m| m["visibility"] == "list" && m["supported_in_api"] == true)
-            .filter_map(|m| m["slug"].as_str().map(str::to_string)),
-    );
+    models.extend(CLI_MODELS.iter().cloned());
     models.sort_unstable();
     models.dedup();
     models
@@ -57,23 +63,46 @@ pub fn listed_models() -> Vec<String> {
     models
 }
 
-pub const MODEL_ALIASES: &[(&str, &str)] = &[
-    ("haiku", "gpt-6-luna"),
-    ("claude-haiku-4-5", "gpt-6-luna"),
-    ("claude-haiku-4-5-20251001", "gpt-6-luna"),
-    ("sonnet", "gpt-5.6-terra"),
-    ("claude-sonnet-4-6", "gpt-5.6-terra"),
-    ("claude-sonnet-5", "gpt-5.6-terra"),
-    ("claude-sonnet-5-5", "gpt-5.6-terra"),
-    ("opus", "gpt-6-sol"),
-    ("claude-opus-4-7", "gpt-6-sol"),
-    ("claude-opus-4-8", "gpt-6-sol"),
-    ("claude-opus-5", "gpt-6-sol"),
-    ("claude-opus-5-5", "gpt-6-sol"),
-    ("fable", "gpt-6-sol"),
-    ("claude-fable-5", "gpt-6-sol"),
-    ("claude-fable-5-1", "gpt-6-sol"),
+/// Alias targets in preference order. The first one the account's CLI catalog
+/// lists wins, so an account without `gpt-6-sol` still gets a working Opus
+/// slot. Without a catalog the first entry is used.
+const OPUS_TARGETS: &[&str] = &["gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol"];
+const SONNET_TARGETS: &[&str] = &["gpt-5.6-terra"];
+const HAIKU_TARGETS: &[&str] = &["gpt-6-luna", "gpt-5.6-luna"];
+
+pub const MODEL_ALIASES: &[(&str, &[&str])] = &[
+    ("haiku", HAIKU_TARGETS),
+    ("claude-haiku-4-5", HAIKU_TARGETS),
+    ("claude-haiku-4-5-20251001", HAIKU_TARGETS),
+    ("sonnet", SONNET_TARGETS),
+    ("claude-sonnet-4-6", SONNET_TARGETS),
+    ("claude-sonnet-5", SONNET_TARGETS),
+    ("claude-sonnet-5-5", SONNET_TARGETS),
+    ("opus", OPUS_TARGETS),
+    ("claude-opus-4-7", OPUS_TARGETS),
+    ("claude-opus-4-8", OPUS_TARGETS),
+    ("claude-opus-5", OPUS_TARGETS),
+    ("claude-opus-5-5", OPUS_TARGETS),
+    ("fable", OPUS_TARGETS),
+    ("claude-fable-5", OPUS_TARGETS),
+    ("claude-fable-5-1", OPUS_TARGETS),
 ];
+
+/// Resolve a Claude-style alias to the preferred model the account has.
+pub fn alias_target(model: &str) -> Option<&'static str> {
+    alias_target_in(model, &CLI_MODELS)
+}
+
+fn alias_target_in(model: &str, catalog: &[String]) -> Option<&'static str> {
+    let targets = MODEL_ALIASES.iter().find(|(alias, _)| *alias == model)?.1;
+    Some(
+        targets
+            .iter()
+            .copied()
+            .find(|target| catalog.iter().any(|m| m == target))
+            .unwrap_or(targets[0]),
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
@@ -109,11 +138,7 @@ pub fn resolve_model_request_with_config_override(
     model: &str,
     apply_config_override: bool,
 ) -> ResolvedModel {
-    let alias = MODEL_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == model)
-        .map(|(_, target)| *target)
-        .unwrap_or(model);
+    let alias = alias_target(model).unwrap_or(model);
 
     let requested = resolve_fast_model_alias(alias);
 
@@ -273,6 +298,19 @@ mod tests {
     }
 
     #[test]
+    fn alias_prefers_the_first_target_the_catalog_lists() {
+        let catalog = ["gpt-6-astra".to_string(), "gpt-5.6-terra".to_string()];
+        assert_eq!(alias_target_in("opus", &catalog), Some("gpt-6-astra"));
+        assert_eq!(
+            alias_target_in("claude-fable-5-1", &catalog),
+            Some("gpt-6-astra")
+        );
+        assert_eq!(alias_target_in("haiku", &catalog), Some("gpt-6-luna"));
+        assert_eq!(alias_target_in("opus", &[]), Some("gpt-6-sol"));
+        assert_eq!(alias_target_in("gpt-6-astra", &catalog), None);
+    }
+
+    #[test]
     fn listed_models_pair_every_model_with_fast() {
         let listed = listed_models();
         for model in ALLOWED_MODELS.iter() {
@@ -300,6 +338,6 @@ mod tests {
 
     #[test]
     fn not_allowed_rejected() {
-        assert!(assert_allowed_model("gpt-7").is_err());
+        assert!(assert_allowed_model("not-a-model").is_err());
     }
 }
