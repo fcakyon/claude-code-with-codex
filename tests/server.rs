@@ -4,6 +4,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::IntoResponse;
 use claude_codex::{
     MessagesRequest,
+    anthropic::MAX_ANTHROPIC_REQUEST_BYTES,
     config::AliasProvider,
     monitor::{MonitorHandle, RequestStatus},
     provider::{CliHandlers, Generation, GenerationBody, Provider, ProviderError, RequestContext},
@@ -202,7 +203,7 @@ impl Provider for IdentityCaptureProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        vec!["gpt-5.5".to_string(), "gpt-5.6-luna".to_string()]
+        vec!["gpt-5.5".to_string(), "gpt-6-luna".to_string()]
     }
 
     fn cli(&self) -> &'static dyn CliHandlers {
@@ -516,6 +517,73 @@ async fn unknown_model_returns_400_with_summary() {
     assert!(message.contains("Supported:"));
 }
 
+fn request_id(response: &axum::response::Response) -> &str {
+    response
+        .headers()
+        .get("request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+}
+
+async fn messages_response(app: axum::Router, model: &str) -> axum::response::Response {
+    app.oneshot(
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages")
+            .header("content-type", "application/json")
+            .body(body_string(
+                &json!({"model": model, "messages": [{"role": "user", "content": "hello"}]})
+                    .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+// Claude Code populates the `requestId` field of every transcript record from
+// the `request-id` response header. Consumers that de-duplicate those records
+// by request id count each request twice without it, because a transcript
+// legitimately repeats a record and the id is what resolves the repeat.
+#[tokio::test]
+async fn successful_response_carries_a_request_id() {
+    let registry = || {
+        Arc::new(Registry::from_providers(
+            AliasProvider::Codex,
+            [Arc::new(IdentityCaptureProvider {
+                captured: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn Provider>],
+        ))
+    };
+    let first = messages_response(app(registry()), "gpt-5.5").await;
+    let second = messages_response(app(registry()), "gpt-5.5").await;
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert!(!request_id(&first).is_empty());
+    assert_ne!(request_id(&first), request_id(&second));
+}
+
+// Errors are de-duplicated by the same key as successes, and a failed turn is
+// the record most worth correlating with a proxy log.
+#[tokio::test]
+async fn rejected_request_carries_a_request_id() {
+    let response =
+        messages_response(app(Arc::new(Registry::with_default_alias())), "not-a-model").await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!request_id(&response).is_empty());
+}
+
+// A provider that answers with a failure status leaves through a different
+// return path than a success.
+#[tokio::test]
+async fn provider_failure_response_carries_a_request_id() {
+    let response = messages_response(app(routed_registry()), "kimi-k2.6").await;
+
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert!(!request_id(&response).is_empty());
+}
+
 #[tokio::test]
 async fn missing_model_returns_400() {
     let app = app(Arc::new(Registry::with_default_alias()));
@@ -541,6 +609,107 @@ async fn missing_model_returns_400() {
         .unwrap();
     let error_type = body["error"]["type"].as_str().unwrap_or("");
     assert_eq!(error_type, "invalid_request_error");
+}
+
+async fn error_body(response: axum::response::Response) -> Value {
+    axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap()
+}
+
+// Builds a valid JSON /v1/messages body of exactly `total_len` bytes that has
+// no "model", so the handler parses it and then fails on the missing model.
+// That failure proves the body cleared the size gate without touching a
+// provider.
+fn padded_messages_body_without_model(total_len: usize) -> String {
+    let prefix = r#"{"messages":[{"role":"user","content":"hello"}],"padding":""#;
+    let suffix = r#""}"#;
+    let padding = total_len - prefix.len() - suffix.len();
+    let mut body = String::with_capacity(total_len);
+    body.push_str(prefix);
+    body.extend(std::iter::repeat_n('a', padding));
+    body.push_str(suffix);
+    assert_eq!(body.len(), total_len);
+    body
+}
+
+#[tokio::test]
+async fn messages_body_over_16mib_clears_size_gate() {
+    const OLD_LIMIT: usize = 16 * 1024 * 1024;
+    const { assert!(MAX_ANTHROPIC_REQUEST_BYTES > OLD_LIMIT) };
+    let app = app(Arc::new(Registry::with_default_alias()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(padded_messages_body_without_model(
+                    OLD_LIMIT + 1,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = error_body(response).await;
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.starts_with("Missing \"model\""),
+        "body over 16 MiB should reach model validation, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn messages_body_at_limit_clears_size_gate() {
+    let app = app(Arc::new(Registry::with_default_alias()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(padded_messages_body_without_model(
+                    MAX_ANTHROPIC_REQUEST_BYTES,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = error_body(response).await;
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.starts_with("Missing \"model\""),
+        "body at the limit should reach model validation, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_bodies_over_limit_return_request_too_large() {
+    for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+        let response = app(Arc::new(Registry::with_default_alias()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(padded_messages_body_without_model(
+                        MAX_ANTHROPIC_REQUEST_BYTES + 1,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = error_body(response).await;
+        assert_eq!(body["error"]["type"], "request_too_large");
+    }
 }
 
 #[tokio::test]
@@ -1356,6 +1525,9 @@ async fn models_endpoint_lists_supported_models() {
     assert!(!data.is_empty());
     let ids: Vec<&str> = data.iter().map(|m| m["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"gpt-5.6-sol"));
+    assert!(ids.contains(&"gpt-6.1-sol"));
+    assert!(ids.contains(&"gpt-6.1-sol-fast"));
+    assert!(ids.contains(&"grok-4.6"));
     for entry in data {
         assert_eq!(entry["type"], "model");
         assert!(entry["display_name"].as_str().is_some());

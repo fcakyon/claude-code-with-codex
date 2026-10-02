@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use super::reducer::{ReducerEvent, reduce_upstream_bytes};
+use super::search_text::search_line;
+use crate::config::GrokSearchBlocks;
 use crate::traffic::TrafficCapture;
 use serde_json::Value;
 
@@ -17,6 +19,24 @@ pub fn accumulate_response_with_traffic(
     message_id: &str,
     model: &str,
     traffic: Option<&TrafficCapture>,
+) -> anyhow::Result<Value> {
+    accumulate_response_with_options(
+        upstream,
+        message_id,
+        model,
+        traffic,
+        crate::config::grok_search_blocks(),
+    )
+}
+
+/// Tests choose the hosted-search block shape directly rather than through the
+/// environment.
+pub fn accumulate_response_with_options(
+    upstream: &[u8],
+    message_id: &str,
+    model: &str,
+    traffic: Option<&TrafficCapture>,
+    search_blocks: GrokSearchBlocks,
 ) -> anyhow::Result<Value> {
     let mut capture = traffic.map(TrafficCapture::stream_capture);
     let mut decoder = super::stream::SseDecoder::default();
@@ -136,6 +156,17 @@ pub fn accumulate_response_with_traffic(
                 name,
                 query,
             } => {
+                if search_blocks == GrokSearchBlocks::Text {
+                    // One text block, not two. Blocks are collected into an
+                    // array here and addressed through `block_positions`, so
+                    // leaving `result_index` unmapped costs nothing. The
+                    // streaming path emits an empty second block instead,
+                    // because there the index goes on the wire.
+                    block_positions.insert(index, blocks.len());
+                    blocks
+                        .push(serde_json::json!({"type":"text","text":search_line(&name,&query)}));
+                    continue;
+                }
                 block_positions.insert(index, blocks.len());
                 blocks.push(serde_json::json!({"type":"server_tool_use","id":id,"name":name,"input":{"query":query}}));
                 block_positions.insert(result_index, blocks.len());
@@ -167,7 +198,11 @@ pub fn accumulate_response_with_traffic(
                 x_search_requests: x_requests,
             } => {
                 stop = stop_reason;
-                input = input_tokens;
+                // The non-streaming response always carries an input count, so
+                // a missing provider field falls back to zero here rather than
+                // dropping the key. The streaming path preserves absence
+                // instead, because it must not erase the seeded estimate.
+                input = input_tokens.unwrap_or(0);
                 output = output_tokens;
                 web_search_requests = web_requests;
                 x_search_requests = x_requests;
@@ -200,6 +235,55 @@ fn finish_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HOSTED_WEB_SEARCH: &[u8] = b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\"}}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"action\":{\"query\":\"rust news\"}}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Result\"}\n\ndata: {\"type\":\"response.output_text.done\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n";
+
+    #[test]
+    fn accumulated_hosted_search_renders_as_text_by_default() {
+        let response = accumulate_response_with_options(
+            HOSTED_WEB_SEARCH,
+            "message",
+            "grok-4.5",
+            None,
+            GrokSearchBlocks::Text,
+        )
+        .unwrap();
+        let types: Vec<&str> = response["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["type"].as_str().unwrap())
+            .collect();
+        // One text block represents the search and one contains the answer.
+        assert_eq!(types, vec!["text", "text"]);
+        assert_eq!(response["content"][0]["text"], "[web search: rust news]\n");
+        assert_eq!(
+            response["usage"]["server_tool_use"]["web_search_requests"],
+            1
+        );
+    }
+
+    #[test]
+    fn accumulated_hosted_search_keeps_the_native_shape_on_request() {
+        let response = accumulate_response_with_options(
+            HOSTED_WEB_SEARCH,
+            "message",
+            "grok-4.5",
+            None,
+            GrokSearchBlocks::Native,
+        )
+        .unwrap();
+        let types: Vec<&str> = response["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["server_tool_use", "web_search_tool_result", "text"]
+        );
+    }
 
     #[test]
     fn accumulate_response_tracks_two_interleaved_tool_calls() {
