@@ -20,6 +20,7 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-opus-5",
+    "claude-opus-5-5",
     "fable",
     "claude-fable-5",
 ];
@@ -47,10 +48,15 @@ pub(crate) const CODEX_MODELS: &[&str] = &[
     "gpt-5.6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
 ];
 
 pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "kimi-k3", "k2.6", "k3"];
-pub(crate) const GROK_MODELS: &[&str] = &["grok-composer-2.5-fast", "grok-4.5"];
+pub(crate) const GROK_MODELS: &[&str] =
+    &["grok-composer-2.5-fast", "grok-4.5", "grok-4.6", "grok-4.7"];
 
 pub struct Registry {
     alias_provider: AliasProvider,
@@ -381,6 +387,7 @@ mod tests {
         for model in [
             "claude-sonnet-5",
             "claude-opus-5",
+            "claude-opus-5-5",
             "fable",
             "claude-fable-5",
         ] {
@@ -445,5 +452,34 @@ mod tests {
                 .name(),
             "cursor"
         );
+    }
+
+    #[test]
+    fn grok_4_7_routes_to_grok() {
+        let registry = Registry::new(AliasProvider::Codex);
+        assert_eq!(
+            registry
+                .provider_for_model("grok-4.7", None)
+                .unwrap()
+                .name(),
+            "grok"
+        );
+    }
+
+    #[test]
+    fn gpt_6_models_route_to_codex() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for model in [
+            "gpt-6-sol",
+            "gpt-6-sol-fast",
+            "gpt-6-luna",
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-fast",
+        ] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                "codex"
+            );
+        }
     }
 }

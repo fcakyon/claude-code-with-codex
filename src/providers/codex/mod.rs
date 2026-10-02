@@ -18,7 +18,7 @@ use axum::Json;
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use http::StatusCode;
+use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,8 +36,8 @@ use crate::retry::{compute_backoff_delay, sleep};
 use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
 use self::compaction::{
-    CompactionAttempt, abort_compaction_attempt, activate_compaction, apply_compaction_replay,
-    begin_compaction, request_compaction, store_compaction,
+    CompactionAttempt, CompactionError, abort_compaction_attempt, activate_compaction,
+    apply_compaction_replay, begin_compaction, request_compaction, store_compaction,
 };
 use self::continuation::{
     ContinuationReservation, abort_continuation_for_owner, continuation_candidate_for_owner,
@@ -96,7 +96,7 @@ impl CodexProvider {
     ) -> Response {
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let want_stream = body.stream;
-        let model = body.model.as_deref().unwrap_or("gpt-5.6-sol");
+        let model = body.model.as_deref().unwrap_or("gpt-6-sol");
 
         let mut resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
@@ -254,6 +254,16 @@ impl CodexProvider {
                         );
                     }
                 }
+                Err(CompactionError::Upstream(error)) if error.usage_limit.is_some() => {
+                    abort_compaction_attempt(Some(session_id), Some(attempt));
+                    log_compaction_event(
+                        "server_compaction_failed",
+                        &ctx,
+                        translated.input.len(),
+                        Some(&error.to_string()),
+                    );
+                    return map_codex_error_to_response(&error);
+                }
                 Err(error) => {
                     abort_compaction_attempt(Some(session_id), Some(attempt));
                     log_compaction_event(
@@ -404,6 +414,11 @@ impl CodexProvider {
             attempt += 1;
             sleep(delay.wait_ms).await;
         };
+        if let Some(failure) = events::first_event_failure(&upstream.body) {
+            abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
+            abort_continuation_for_owner(&request_continuation);
+            return map_codex_event_failure_to_response(&failure);
+        }
         log.info(
             "codex_upstream_response_received",
             Some(serde_json::Map::from_iter([
@@ -540,7 +555,7 @@ impl Provider for CodexProvider {
     }
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
-        let model = body.model.as_deref().unwrap_or("gpt-5.6-sol");
+        let model = body.model.as_deref().unwrap_or("gpt-6-sol");
         let mut resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
         if let Err(e) = assert_allowed_model(&resolved.model) {
@@ -882,39 +897,35 @@ async fn live_stream_response_once(
         {
             Ok(result) => result,
             Err(message) => {
-                if retryable_live_start_payload(&payload, &message) {
-                    let lower_message = message.to_ascii_lowercase();
-                    let status = websocket::event_error_status(&payload).unwrap_or_else(|| {
-                        let error = payload.get("error").or_else(|| {
-                            payload.get("response").and_then(|value| value.get("error"))
-                        });
-                        let overloaded = error.is_some_and(|error| {
-                            error.get("code").and_then(|value| value.as_str())
-                                == Some("overloaded_error")
-                                || error.get("type").and_then(|value| value.as_str())
-                                    == Some("overloaded_error")
-                        });
-                        if payload.get("type").and_then(|value| value.as_str())
-                            == Some("codex.rate_limits")
-                            || lower_message.contains("rate limit")
-                        {
-                            429
-                        } else if overloaded || lower_message.contains("overloaded") {
-                            529
-                        } else {
-                            503
-                        }
-                    });
-                    return provider_retry(
-                        &upstream_events,
-                        client::CodexError {
-                            status,
-                            message: message.clone(),
-                            detail: Some(message),
-                            retry_after: retry_after_from_live_payload(&payload),
-                            origin: client::CodexErrorOrigin::WebSocket,
-                        },
+                // A spent subscription window reopens hours from now, so the
+                // retry budget can only burn the request down to the same 429.
+                // Report it once, with the reset clock upstream supplied.
+                if let Some(limit) = events::usage_limit_from_event(&payload) {
+                    abort_request_state(
+                        ctx.session_id.as_deref(),
+                        &request_continuation,
+                        compaction.attempt,
                     );
+                    return LiveStreamStart::Response(usage_limit_response(&limit));
+                }
+                if let Some(failure) = events::classify_event_failure(&payload) {
+                    if failure.retryable() {
+                        return provider_retry(
+                            &upstream_events,
+                            codex_event_failure_error(
+                                &failure,
+                                client::CodexErrorOrigin::WebSocket,
+                            ),
+                        );
+                    }
+                    abort_request_state(
+                        ctx.session_id.as_deref(),
+                        &request_continuation,
+                        compaction.attempt,
+                    );
+                    return LiveStreamStart::Response(map_codex_event_failure_to_response(
+                        &failure,
+                    ));
                 }
                 abort_request_state(
                     ctx.session_id.as_deref(),
@@ -983,6 +994,7 @@ async fn live_stream_response_once(
             message: "WebSocket connection closed before terminal Codex response event".to_string(),
             detail: Some(websocket::WEBSOCKET_MISSING_TERMINAL_DETAIL.to_string()),
             retry_after: None,
+            usage_limit: None,
             origin: client::CodexErrorOrigin::WebSocket,
         },
     )
@@ -994,6 +1006,7 @@ fn empty_live_completion_error() -> client::CodexError {
         message: "Codex completed without producing output".to_string(),
         detail: Some(EMPTY_CODEX_COMPLETION_DETAIL.to_string()),
         retry_after: None,
+        usage_limit: None,
         origin: client::CodexErrorOrigin::WebSocket,
     }
 }
@@ -1011,7 +1024,7 @@ fn translate_live_stream_payload(
     traffic: Option<&crate::traffic::TrafficCapture>,
 ) -> Result<(Vec<u8>, bool), String> {
     let chunk = translator.accept(payload, traffic)?;
-    let terminal = is_codex_terminal_event(payload) || translator.is_finished();
+    let terminal = events::event_is_terminal(payload) || translator.is_finished();
     Ok((chunk, terminal))
 }
 
@@ -1126,9 +1139,16 @@ fn remaining_live_stream_response(
                                 &request_continuation,
                                 compaction.attempt,
                             );
+                            let failure = events::classify_event_failure(&payload);
+                            let error_type = failure
+                                .as_ref()
+                                .map_or("api_error", events::CodexEventFailure::client_error_type);
+                            let error_message = failure
+                                .as_ref()
+                                .map_or(message.as_str(), |failure| failure.message.as_str());
                             let chunk = translator.error_chunk(
-                                &message,
-                                "api_error",
+                                error_message,
+                                error_type,
                                 ctx.traffic.as_deref(),
                             );
                             if !chunk.is_empty() {
@@ -1168,12 +1188,14 @@ fn remaining_live_stream_response(
                         &request_continuation,
                         compaction.attempt,
                     );
-                    let chunk =
-                        translator.finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
-                    if !chunk.is_empty() {
-                        record_live_stream_progress(&ctx, &chunk);
-                        let _ = tx.send(Ok(Bytes::from(chunk))).await;
-                        return;
+                    if err.origin == client::CodexErrorOrigin::WebSocket {
+                        let chunk = translator
+                            .finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
+                        if !chunk.is_empty() {
+                            record_live_stream_progress(&ctx, &chunk);
+                            let _ = tx.send(Ok(Bytes::from(chunk))).await;
+                            return;
+                        }
                     }
                     let error_type = codex_stream_error_type(&err);
                     let chunk = translator.error_chunk(
@@ -1246,6 +1268,7 @@ fn empty_buffered_completion_error() -> client::CodexError {
         message: "Codex completed without producing output".to_string(),
         detail: Some(EMPTY_CODEX_COMPLETION_DETAIL.to_string()),
         retry_after: None,
+        usage_limit: None,
         origin: match config::codex_transport() {
             config::CodexTransport::Http => client::CodexErrorOrigin::BufferedHttp,
             _ => client::CodexErrorOrigin::BufferedWebSocket,
@@ -1279,23 +1302,8 @@ fn is_empty_codex_success_completion(upstream_sse: &[u8]) -> bool {
     saw_success_terminal
 }
 
-fn is_codex_terminal_event(payload: &serde_json::Value) -> bool {
-    matches!(
-        payload.get("type").and_then(|v| v.as_str()),
-        Some("response.completed")
-            | Some("response.incomplete")
-            | Some("response.done")
-            | Some("response.failed")
-            | Some("response.error")
-            | Some("error")
-    )
-}
-
 fn is_codex_success_terminal_event(payload: &serde_json::Value) -> bool {
-    matches!(
-        payload.get("type").and_then(|v| v.as_str()),
-        Some("response.completed") | Some("response.done")
-    )
+    events::event_is_success_terminal(payload)
 }
 
 fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {
@@ -1352,12 +1360,18 @@ fn retryable_live_message(message: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-fn retryable_live_start_payload(payload: &serde_json::Value, _message: &str) -> bool {
-    events::classify_event_failure(payload).is_some_and(|failure| failure.retryable())
-}
-
-fn retry_after_from_live_payload(payload: &serde_json::Value) -> Option<String> {
-    events::classify_event_failure(payload).and_then(|failure| failure.retry_after)
+fn codex_event_failure_error(
+    failure: &events::CodexEventFailure,
+    origin: client::CodexErrorOrigin,
+) -> client::CodexError {
+    client::CodexError {
+        status: failure.status,
+        message: failure.message.clone(),
+        detail: Some(failure.message.clone()),
+        retry_after: failure.retry_after.clone(),
+        usage_limit: None,
+        origin,
+    }
 }
 
 fn codex_stream_error_type(err: &client::CodexError) -> &'static str {
@@ -1413,7 +1427,52 @@ fn update_continuation_from_upstream(
 // Error mapping
 // ---------------------------------------------------------------------------
 
+/// Answer a spent subscription window with the rate limit headers the client
+/// reads, so it can name the exhausted window and show when it reopens.
+///
+/// `Retry-After` is deliberately absent: clients sleep for its full value, and
+/// here that is hours. `x-should-retry: false` stops the retry loop instead,
+/// which is the honest signal — a spent window does not reopen on a backoff.
+fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("x-should-retry"),
+        HeaderValue::from_static("false"),
+    );
+    headers.insert(
+        HeaderName::from_static("anthropic-ratelimit-unified-status"),
+        HeaderValue::from_static("rejected"),
+    );
+    if let Some(resets_at) = limit.resets_at
+        && let Ok(value) = HeaderValue::from_str(&resets_at.to_string())
+    {
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-unified-reset"),
+            value,
+        );
+    }
+    if let Some(window) = limit.window {
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-unified-representative-claim"),
+            HeaderValue::from_static(window.claim()),
+        );
+    }
+
+    (
+        headers,
+        json_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_error",
+            &limit.message,
+        ),
+    )
+        .into_response()
+}
+
 fn map_codex_error_to_response(err: &client::CodexError) -> Response {
+    if let Some(limit) = err.usage_limit.as_ref() {
+        return usage_limit_response(limit);
+    }
     let message = codex_error_message(err);
     if is_context_window_overflow(message) {
         return map_codex_failure_to_response(message);
@@ -1474,6 +1533,16 @@ fn map_codex_failure_to_response(message: &str) -> Response {
         json_error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large", message)
     } else {
         json_error(StatusCode::BAD_GATEWAY, "api_error", message)
+    }
+}
+
+fn map_codex_event_failure_to_response(failure: &events::CodexEventFailure) -> Response {
+    let status = StatusCode::from_u16(failure.client_status()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let response = json_error(status, failure.client_error_type(), &failure.message);
+    if let Some(retry_after) = failure.retry_after.as_deref() {
+        ([(http::header::RETRY_AFTER, retry_after)], response).into_response()
+    } else {
+        response
     }
 }
 
@@ -1622,7 +1691,6 @@ mod tests {
             base_url,
             1_000,
             1_000,
-            0,
         );
         client
             .auth_manager()
@@ -1785,6 +1853,8 @@ mod tests {
             ("gpt-5.6-luna", "gpt-5.6-sol"),
             ("gpt-5.6-sol", "gpt-5.6-sol"),
             ("gpt-5.6-terra", "gpt-5.6-terra"),
+            ("gpt-6-luna", "gpt-6-sol"),
+            ("gpt-6-sol", "gpt-6-sol"),
             ("gpt-5.4", "gpt-5.4"),
         ] {
             let mut model = resolved.to_string();
@@ -1802,6 +1872,8 @@ mod tests {
         for (resolved, lite_expected) in [
             ("gpt-5.6-luna", true),
             ("gpt-5.6-sol", true),
+            ("gpt-6-luna", true),
+            ("gpt-6-sol", true),
             ("gpt-5.4", false),
         ] {
             let mut model = resolved.to_string();
@@ -1979,6 +2051,11 @@ mod tests {
         assert!(models.contains(&"gpt-5.6-sol-fast".to_string()));
         assert!(models.contains(&"gpt-5.6-terra".to_string()));
         assert!(models.contains(&"gpt-5.6-luna".to_string()));
+        assert!(models.contains(&"gpt-6-sol".to_string()));
+        assert!(models.contains(&"gpt-6-sol-fast".to_string()));
+        assert!(models.contains(&"gpt-6-luna".to_string()));
+        assert!(models.contains(&"gpt-6.1-sol".to_string()));
+        assert!(models.contains(&"gpt-6.1-sol-fast".to_string()));
         assert!(models.contains(&"gpt-5.4".to_string()));
         assert!(models.contains(&"gpt-5.4-mini".to_string()));
     }
@@ -2009,6 +2086,7 @@ mod tests {
             message: "invalid request".to_string(),
             detail: Some("invalid request".to_string()),
             retry_after: Some("7".to_string()),
+            usage_limit: None,
             origin: client::CodexErrorOrigin::WebSocketHandshake,
         };
         let response = map_codex_error_to_response(&err);
@@ -2026,6 +2104,7 @@ mod tests {
             message: "WebSocket connect error: HTTP error: 502 Bad Gateway".to_string(),
             detail: None,
             retry_after: None,
+            usage_limit: None,
             origin: client::CodexErrorOrigin::WebSocket,
         };
 
@@ -2061,6 +2140,7 @@ mod tests {
             message: "WebSocket connect timeout after 15000ms".to_string(),
             detail: None,
             retry_after: None,
+            usage_limit: None,
             origin: client::CodexErrorOrigin::WebSocketHandshake,
         };
 
@@ -2074,6 +2154,7 @@ mod tests {
             message: "WebSocket proxy tunnel was rejected".to_string(),
             detail: Some(websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL.to_string()),
             retry_after: None,
+            usage_limit: None,
             origin: client::CodexErrorOrigin::WebSocketHandshake,
         };
 
@@ -2087,6 +2168,7 @@ mod tests {
             message: "WebSocket keepalive error: test write failed".to_string(),
             detail: Some(websocket::WEBSOCKET_KEEPALIVE_FAILURE_DETAIL.to_string()),
             retry_after: None,
+            usage_limit: None,
             origin: client::CodexErrorOrigin::WebSocket,
         };
 
@@ -2094,35 +2176,35 @@ mod tests {
     }
 
     #[test]
-    fn live_start_payload_retry_detection_covers_rate_limit_and_overload() {
-        assert!(retryable_live_start_payload(
-            &serde_json::json!({
+    fn live_start_payload_retry_detection_uses_event_failure_classification() {
+        assert!(
+            events::classify_event_failure(&serde_json::json!({
                 "type": "codex.rate_limits",
                 "rate_limits": {"limit_reached": true}
-            }),
-            "rate limit reached",
-        ));
-        assert!(retryable_live_start_payload(
-            &serde_json::json!({
+            }))
+            .is_none()
+        );
+        assert!(
+            events::classify_event_failure(&serde_json::json!({
                 "type": "response.failed",
                 "response": {"error": {"type": "overloaded_error", "message": "overloaded"}}
-            }),
-            "overloaded",
-        ));
-        assert!(!retryable_live_start_payload(
-            &serde_json::json!({
+            }))
+            .is_some_and(|failure| failure.retryable())
+        );
+        assert!(
+            !events::classify_event_failure(&serde_json::json!({
                 "type": "response.failed",
-                "response": {"error": {"message": "bad request"}}
-            }),
-            "bad request",
-        ));
+                "response": {"error": {"status": 400, "code": "invalid_prompt", "message": "bad request"}}
+            }))
+            .is_some_and(|failure| failure.retryable())
+        );
     }
 
     async fn run_live_failure_case(
         session_id: &str,
         event: serde_json::Value,
         expected_attempts: usize,
-    ) -> StatusCode {
+    ) -> Response {
         let owner = ConversationIdentity::Main(session_id.to_string());
         continuation::clear_continuation_for_owner(Some(&owner));
         websocket::invalidate_codex_websocket_pool_owner(&owner);
@@ -2172,7 +2254,54 @@ mod tests {
             Vec::new()
         ));
         websocket::invalidate_codex_websocket_pool_owner(&owner);
-        response.status()
+        response
+    }
+
+    #[tokio::test]
+    async fn usage_limit_fast_fails_websocket_and_aborts_request_state() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
+        let response = run_live_failure_case(
+            "live-usage-limit-cleanup",
+            serde_json::json!({
+                "type": "error",
+                "status_code": 429,
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "The usage limit has been reached",
+                    "resets_at": 1788879437u64,
+                    "resets_in_seconds": 9568
+                },
+                "headers": {
+                    "X-Codex-Primary-Window-Minutes": "300",
+                    "X-Codex-Primary-Reset-After-Seconds": "9569",
+                    "X-Codex-Secondary-Window-Minutes": "10080",
+                    "X-Codex-Secondary-Reset-After-Seconds": "596369"
+                }
+            }),
+            1,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["x-should-retry"], "false");
+        assert_eq!(
+            response.headers()["anthropic-ratelimit-unified-status"],
+            "rejected"
+        );
+        assert_eq!(
+            response.headers()["anthropic-ratelimit-unified-reset"],
+            "1788879437"
+        );
+        assert_eq!(
+            response.headers()["anthropic-ratelimit-unified-representative-claim"],
+            "five_hour"
+        );
+        assert!(!response.headers().contains_key(http::header::RETRY_AFTER));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["message"], "The usage limit has been reached");
     }
 
     #[tokio::test]
@@ -2370,16 +2499,21 @@ mod tests {
         let status = run_live_failure_case(
             "live-retry-exhaustion-cleanup",
             serde_json::json!({
-                "type": "codex.rate_limits",
-                "rate_limits": {
-                    "allowed": false,
-                    "limit_reached": true,
-                    "primary": {"reset_after_seconds": 0}
+                "type": "response.failed",
+                "response": {
+                    "status": "failed",
+                    "error": {
+                        "status": 429,
+                        "code": "rate_limit_exceeded",
+                        "message": "rate limit reached",
+                        "retry_after_seconds": 0
+                    }
                 }
             }),
             11,
         )
-        .await;
+        .await
+        .status();
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 
@@ -2390,16 +2524,21 @@ mod tests {
         let status = run_live_failure_case(
             "live-excessive-retry-after-cleanup",
             serde_json::json!({
-                "type": "codex.rate_limits",
-                "rate_limits": {
-                    "allowed": false,
-                    "limit_reached": true,
-                    "primary": {"reset_after_seconds": 31}
+                "type": "response.failed",
+                "response": {
+                    "status": "failed",
+                    "error": {
+                        "status": 429,
+                        "code": "rate_limit_exceeded",
+                        "message": "rate limit reached",
+                        "retry_after_seconds": 31
+                    }
                 }
             }),
             1,
         )
-        .await;
+        .await
+        .status();
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 
@@ -2413,13 +2552,18 @@ mod tests {
                 "type": "response.failed",
                 "response": {
                     "status": "failed",
-                    "error": {"message": "invalid request"}
+                    "error": {
+                        "status": 400,
+                        "code": "invalid_prompt",
+                        "message": "invalid request"
+                    }
                 }
             }),
             1,
         )
-        .await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        .await
+        .status();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -2445,11 +2589,14 @@ mod tests {
             emit_live_event(
                 &mut first_websocket,
                 &serde_json::json!({
-                    "type": "codex.rate_limits",
-                    "rate_limits": {
-                        "allowed": false,
-                        "limit_reached": true,
-                        "primary": {"reset_after_seconds": 0}
+                    "type": "response.failed",
+                    "response": {
+                        "status": "failed",
+                        "error": {
+                            "status": 429,
+                            "message": "rate limit exceeded",
+                            "retry_after_seconds": 0
+                        }
                     }
                 }),
             )

@@ -1,3 +1,16 @@
+## v0.4.0 (2026-10-02)
+
+- Merge upstream claude-code-proxy v0.1.33 through v0.1.43. Codex gains
+  `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, and `gpt-6.1-sol` with `-fast`
+  variants, the `claude-opus-5-5` alias, a five minute response header timeout,
+  the current session header, immediate failure on exhausted quota, compaction
+  effort caps, tool schema stripping for Claude Code 2.1.265+, and a 64 MiB
+  request body limit. Grok gains `grok-4.6` and `grok-4.7`, hosted web search,
+  and usage reporting fixes. HTTP clients honor the platform trust store,
+  `SSL_CERT_FILE`, and `SSL_CERT_DIR`. `claude-codex monitor` attaches a
+  dashboard to a background proxy.
+- The OpenCode Go provider and the docs site stay out of this fork.
+
 ## v0.1.32 (2026-08-03)
 
 - Kimi subagents and multimodal messages with mixed text and images work instead

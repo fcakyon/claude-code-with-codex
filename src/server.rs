@@ -1,5 +1,5 @@
 use crate::{
-    anthropic::json_error,
+    anthropic::{MAX_ANTHROPIC_REQUEST_BYTES, json_error},
     logging::{Logger, REDACT_KEYS, create_logger},
     monitor::{EndpointKind, MonitorHandle},
     openai_compat::{
@@ -34,7 +34,7 @@ use axum::{
     body::Body,
     extract::{DefaultBodyLimit, FromRequest, Multipart, Query, State},
     http::{Request, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use http_body_util::{BodyExt, StreamBody};
@@ -51,7 +51,7 @@ use uuid::Uuid;
 
 const CLAUDE_AUTO_REVIEW_SYSTEM_PREFIX: &str =
     "You are a security monitor for autonomous AI coding agents.";
-const CODEX_AUTO_REVIEW_MODEL: &str = "gpt-5.6-luna";
+const CODEX_AUTO_REVIEW_MODEL: &str = "gpt-6-luna";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AutoReviewRoute {
@@ -168,9 +168,12 @@ pub async fn serve_listener(
         ])),
     );
     let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
     Ok(())
 }
 
@@ -259,6 +262,7 @@ pub fn app_with_features(
     });
     let router = Router::new()
         .route("/healthz", get(healthz))
+        .route("/monitor", get(handler_monitor))
         .route("/v1/messages", post(handler_messages))
         .route("/v1/messages/count_tokens", post(handler_count_tokens))
         .route("/v1/models", get(handler_models));
@@ -299,6 +303,40 @@ struct AppState {
     chat_completions: Option<Arc<ChatCompletionsBackend>>,
     images: Option<Arc<CodexImagesBackend>>,
     transcriptions: Option<Arc<CodexTranscriptionBackend>>,
+}
+
+async fn handler_monitor(
+    State(state): State<Arc<AppState>>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+) -> Response {
+    let Some(axum::Extension(axum::extract::ConnectInfo(peer))) = peer else {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            "Monitor access requires a local connection",
+        );
+    };
+    if !peer.ip().to_canonical().is_loopback() {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            "Monitor access requires a local connection",
+        );
+    }
+    match &state.monitor {
+        Some(monitor) => (
+            [(http::header::CACHE_CONTROL, "no-store")],
+            Json(crate::monitor::snapshot::MonitorResponse::from(
+                monitor.snapshot(),
+            )),
+        )
+            .into_response(),
+        None => json_error(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            "Monitor collection is disabled",
+        ),
+    }
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -1416,13 +1454,14 @@ async fn dispatch_request(
     }
     let request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
     let now = current_millis();
-    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_OPENAI_REQUEST_BYTES).await {
+    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_ANTHROPIC_REQUEST_BYTES).await
+    {
         Ok(bytes) => bytes,
-        Err(err) => {
+        Err(_) => {
             let response = json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!("Invalid JSON: {err}"),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "Request body exceeded the size limit",
             );
             log_request_completed(
                 &log,
@@ -1456,7 +1495,7 @@ async fn dispatch_request(
                     .map(|details| details.message.as_str())
                     .unwrap_or("Invalid JSON"),
             );
-            return response;
+            return with_request_id(response, &req_id);
         }
     };
 
@@ -1496,7 +1535,7 @@ async fn dispatch_request(
                     .map(|details| details.message.as_str())
                     .unwrap_or("Invalid JSON"),
             );
-            return response;
+            return with_request_id(response, &req_id);
         }
     };
 
@@ -1551,7 +1590,7 @@ async fn dispatch_request(
                     .map(|details| details.message.as_str())
                     .unwrap_or("Missing model"),
             );
-            return response;
+            return with_request_id(response, &req_id);
         }
     };
 
@@ -1638,7 +1677,7 @@ async fn dispatch_request(
                     .map(|details| details.message.as_str())
                     .unwrap_or("Unknown model"),
             );
-            return response;
+            return with_request_id(response, &req_id);
         }
     };
 
@@ -1792,6 +1831,31 @@ async fn dispatch_request(
             format!("HTTP {}", status.as_u16()),
         );
     }
+    with_request_id(response, &req_id)
+}
+
+/// Header Claude Code reads to populate the `requestId` field it writes into
+/// every transcript record.
+const REQUEST_ID_HEADER: &str = "request-id";
+
+/// Publish the per-request id this proxy mints. Anthropic returns `request-id`,
+/// and Claude Code records it as `requestId`; without it every downstream
+/// consumer that de-duplicates transcript records by request id (its own
+/// parser, usage dashboards) counts each request twice, because a transcript
+/// legitimately repeats a record and the id is what resolves it.
+///
+/// An upstream-supplied id is preserved: relabelling a real provider id with a
+/// local uuid would lose the more useful value.
+fn stamp_request_id(headers: &mut http::HeaderMap, req_id: &str) {
+    if !headers.contains_key(REQUEST_ID_HEADER)
+        && let Ok(value) = http::HeaderValue::from_str(req_id)
+    {
+        headers.insert(REQUEST_ID_HEADER, value);
+    }
+}
+
+fn with_request_id(mut response: Response, req_id: &str) -> Response {
+    stamp_request_id(response.headers_mut(), req_id);
     response
 }
 
@@ -1801,7 +1865,10 @@ fn monitor_response_body(response: Response, guard: RequestMonitorGuard) -> Resp
         .extensions()
         .get::<NativeResponseOutcome>()
         .cloned();
-    let (parts, body) = response.into_parts();
+    let (mut parts, body) = response.into_parts();
+    // Stamped on the parts before the body is streamed, so a streaming SSE
+    // response carries the header too.
+    stamp_request_id(&mut parts.headers, &guard.req_id);
     let stream = futures_util::stream::unfold(
         (body, guard, outcome),
         move |(mut body, mut guard, outcome)| async move {
@@ -2158,6 +2225,71 @@ fn _unused(session_state: Option<&SessionState>) {
 }
 
 #[cfg(test)]
+mod request_id_header_tests {
+    use super::{REQUEST_ID_HEADER, RequestMonitorGuard, monitor_response_body};
+    use axum::body::Body;
+    use axum::response::Response;
+    use http::{HeaderValue, StatusCode};
+
+    fn guard(req_id: &str) -> RequestMonitorGuard {
+        RequestMonitorGuard::new(None, req_id.to_string())
+    }
+
+    // Claude Code populates its transcript `requestId` from this header.
+    // Without it, consumers that de-duplicate transcript records by request id
+    // count every request twice, because a transcript legitimately repeats a
+    // record and the id is what resolves the repeat.
+    #[test]
+    fn stamps_the_request_id_on_a_response() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from("{}"))
+            .unwrap();
+        let stamped = monitor_response_body(response, guard("req-abc-123"));
+        assert_eq!(
+            stamped.headers().get(REQUEST_ID_HEADER).unwrap(),
+            "req-abc-123"
+        );
+    }
+
+    // Streaming responses carry it too: the header is applied to the parts
+    // before the body is streamed, which is why the body-level message id is
+    // not a substitute for SSE.
+    #[test]
+    fn stamps_a_streaming_response_before_the_body() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(Body::from("event: message_start\n"))
+            .unwrap();
+        let stamped = monitor_response_body(response, guard("req-stream-1"));
+        assert_eq!(
+            stamped.headers().get(REQUEST_ID_HEADER).unwrap(),
+            "req-stream-1"
+        );
+    }
+
+    // An upstream that already supplied one owns it; overwriting would relabel
+    // a real provider id with a local uuid.
+    #[test]
+    fn does_not_clobber_an_upstream_supplied_id() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                REQUEST_ID_HEADER,
+                HeaderValue::from_static("upstream-owned"),
+            )
+            .body(Body::from("{}"))
+            .unwrap();
+        let stamped = monitor_response_body(response, guard("local-uuid"));
+        assert_eq!(
+            stamped.headers().get(REQUEST_ID_HEADER).unwrap(),
+            "upstream-owned"
+        );
+    }
+}
+
+#[cfg(test)]
 mod auto_review_tests {
     use super::{apply_auto_review_model, headers_to_record, is_claude_auto_review_request};
     use crate::anthropic::schema::MessagesRequest;
@@ -2216,8 +2348,8 @@ mod auto_review_tests {
         let route = apply_auto_review_model(&mut classifier, false, None, "codex")
             .expect("classifier should be routed");
         assert_eq!(route.requested_model, "gpt-5.6-sol");
-        assert_eq!(route.override_model, "gpt-5.6-luna");
-        assert_eq!(classifier.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(route.override_model, "gpt-6-luna");
+        assert_eq!(classifier.model.as_deref(), Some("gpt-6-luna"));
     }
 
     #[test]

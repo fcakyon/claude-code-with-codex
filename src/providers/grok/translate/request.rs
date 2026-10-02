@@ -5,7 +5,9 @@ use serde_json::Value;
 
 use crate::anthropic::schema::{Message, MessagesRequest};
 use crate::config::GrokToolImageMode;
-use crate::providers::translate_shared::{ImageSource, image_source_to_url, parallel_tool_calls};
+use crate::providers::translate_shared::{
+    ImageSource, image_source_to_url, parallel_tool_calls, read_effort_with_allowed,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GrokResponsesRequest {
@@ -19,6 +21,8 @@ pub struct GrokResponsesRequest {
     pub tool_choice: Option<GrokToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<GrokReasoning>,
     pub store: bool,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,10 +89,20 @@ pub struct GrokTool {
     pub from_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to_date: Option<String>,
+    #[serde(skip)]
+    choice_name: Option<String>,
 }
 
 impl GrokTool {
     fn hosted(kind: &str) -> Self {
+        Self::hosted_for_choice(kind, None)
+    }
+
+    fn hosted_named(kind: &str, name: &str) -> Self {
+        Self::hosted_for_choice(kind, Some(name))
+    }
+
+    fn hosted_for_choice(kind: &str, choice_name: Option<&str>) -> Self {
         Self {
             kind: kind.into(),
             name: None,
@@ -98,6 +112,7 @@ impl GrokTool {
             excluded_x_handles: None,
             from_date: None,
             to_date: None,
+            choice_name: choice_name.map(str::to_string),
         }
     }
 
@@ -111,6 +126,7 @@ impl GrokTool {
             excluded_x_handles: None,
             from_date: None,
             to_date: None,
+            choice_name: Some(name.into()),
         }
     }
 }
@@ -122,6 +138,11 @@ pub enum GrokToolChoice {
     Required(String),
     None(String),
     Function { r#type: String, name: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GrokReasoning {
+    pub effort: String,
 }
 
 pub fn translate_request(
@@ -136,43 +157,78 @@ pub fn translate_request_with_mode(
     model: String,
     image_mode: GrokToolImageMode,
 ) -> anyhow::Result<GrokResponsesRequest> {
+    translate_request_with_options(req, model, image_mode, crate::config::grok_hosted_search())
+}
+
+/// `hosted_search` selects how xAI's hosted search tools reach the model. When
+/// disabled, the translator offers `x_search` only for X-specific turns and
+/// preserves every caller tool. When enabled, hosted tools replace caller
+/// search tools and explicit search turns require a tool call. Tests pass the
+/// policy directly so their behavior is independent of process configuration.
+pub fn translate_request_with_options(
+    req: &MessagesRequest,
+    model: String,
+    image_mode: GrokToolImageMode,
+    hosted_search: bool,
+) -> anyhow::Result<GrokResponsesRequest> {
     reject_unknown_top_level(req)?;
     let mut instructions = parse_system(req.extra.get("system"))?;
-    let mut tools = parse_tools(req.extra.get("tools"))?;
+    let mut tools = parse_tools(req.extra.get("tools"), hosted_search)?;
     let hosted_web_search = tools
         .as_ref()
         .is_some_and(|tools| tools.iter().any(|tool| tool.kind == "web_search"));
     let dedicated_x_search = tools
         .as_ref()
         .is_some_and(|tools| tools.iter().any(|tool| tool.kind == "x_search"));
-    let x_search_intent = requests_x_search(req);
-    let force_x_search = dedicated_x_search || x_search_intent;
-    let force_web_search = !force_x_search && hosted_web_search && requests_web_search(req);
-    if force_x_search {
-        tools = Some(vec![GrokTool::hosted("x_search")]);
-    } else if force_web_search {
-        tools = Some(vec![GrokTool::hosted("web_search")]);
-    } else {
+    let mut forced_hosted_tool = false;
+    if hosted_search {
+        // The enabled policy favors xAI-hosted search and citations over the
+        // caller's search implementation. Explicit search turns expose only
+        // the selected hosted tool and require a tool call.
+        let force_x_search = dedicated_x_search || requests_x_search(req);
+        let force_web_search = !force_x_search && hosted_web_search && requests_web_search(req);
+        if force_x_search {
+            tools = Some(vec![GrokTool::hosted("x_search")]);
+        } else if force_web_search {
+            tools = Some(vec![GrokTool::hosted("web_search")]);
+        } else {
+            let tools = tools.get_or_insert_default();
+            if !tools.iter().any(|tool| tool.kind == "x_search") {
+                tools.push(GrokTool::hosted("x_search"));
+            }
+        }
+        if hosted_web_search {
+            append_guidance(
+                &mut instructions,
+                "For general web searches, use the hosted web_search tool. Do not use shell commands, HTTP clients, or local tools to search the web.",
+            );
+        }
+        if force_x_search {
+            append_guidance(
+                &mut instructions,
+                "For requests to search X or Twitter, use the hosted x_search tool. XSearch accepts a query and supports allowed_x_handles, excluded_x_handles, from_date, and to_date filters. Do not use Bash, curl, HTTP clients, or general web_search for X searches.",
+            );
+        }
+        forced_hosted_tool = force_x_search || force_web_search;
+    } else if requests_x_search(req) {
+        // The disabled policy adds access to xAI's X index without changing
+        // caller tools, instructions, or tool choice.
         let tools = tools.get_or_insert_default();
         if !tools.iter().any(|tool| tool.kind == "x_search") {
             tools.push(GrokTool::hosted("x_search"));
         }
     }
-    if hosted_web_search {
-        append_guidance(
-            &mut instructions,
-            "For general web searches, use the hosted web_search tool. Do not use shell commands, HTTP clients, or local tools to search the web.",
-        );
-    }
-    append_guidance(
-        &mut instructions,
-        "For requests to search X or Twitter, use the hosted x_search tool. XSearch accepts a query and supports allowed_x_handles, excluded_x_handles, from_date, and to_date filters. Do not use Bash, curl, HTTP clients, or general web_search for X searches.",
-    );
-    let tool_choice = if force_x_search || force_web_search {
+    let tool_choice = if forced_hosted_tool {
         Some(GrokToolChoice::Required("required".into()))
     } else {
-        parse_tool_choice(req.extra.get("tool_choice"), tools.as_ref())?
+        parse_tool_choice(req.extra.get("tool_choice"), &mut tools)?
     };
+    let reasoning =
+        read_effort_with_allowed(req, &["none", "low", "medium", "high", "xhigh", "max"])?.map(
+            |effort| GrokReasoning {
+                effort: map_reasoning_effort(effort, &model),
+            },
+        );
     let mut call_ids = HashSet::new();
     let mut input = Vec::new();
     let mut budget = ReattachBudget::new(&req.messages, image_mode);
@@ -186,6 +242,7 @@ pub fn translate_request_with_mode(
         tools,
         tool_choice,
         parallel_tool_calls: parallel_tool_calls(req),
+        reasoning,
         store: false,
         stream: true,
         max_output_tokens: req.max_tokens,
@@ -299,6 +356,21 @@ fn latest_user_text(req: &MessagesRequest) -> Option<String> {
     }
 }
 
+fn contains_phrase(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase).any(|(start, _)| {
+        let end = start + phrase.len();
+        let starts_at_boundary = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_');
+        let ends_at_boundary = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_');
+        starts_at_boundary && ends_at_boundary
+    })
+}
+
 fn requests_x_search(req: &MessagesRequest) -> bool {
     let Some(text) = latest_user_text(req) else {
         return false;
@@ -315,7 +387,7 @@ fn requests_x_search(req: &MessagesRequest) -> bool {
         "twitter posts",
     ]
     .iter()
-    .any(|phrase| text.contains(phrase))
+    .any(|phrase| contains_phrase(&text, phrase))
 }
 
 fn requests_web_search(req: &MessagesRequest) -> bool {
@@ -330,7 +402,16 @@ fn requests_web_search(req: &MessagesRequest) -> bool {
         "look up on the web",
     ]
     .iter()
-    .any(|phrase| text.contains(phrase))
+    .any(|phrase| contains_phrase(&text, phrase))
+}
+
+fn map_reasoning_effort(effort: &str, model: &str) -> String {
+    match effort {
+        "none" | "low" | "medium" | "high" => effort.to_string(),
+        "xhigh" | "max" if model == "grok-4.6" => "xhigh".to_string(),
+        "xhigh" | "max" => "high".to_string(),
+        _ => unreachable!("read_effort_with_allowed validates the effort"),
+    }
 }
 
 fn reject_unknown_top_level(req: &MessagesRequest) -> anyhow::Result<()> {
@@ -405,7 +486,10 @@ fn parse_system(value: Option<&Value>) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn parse_tools(value: Option<&Value>) -> anyhow::Result<Option<Vec<GrokTool>>> {
+fn parse_tools(
+    value: Option<&Value>,
+    hosted_search: bool,
+) -> anyhow::Result<Option<Vec<GrokTool>>> {
     let Some(value) = value else { return Ok(None) };
     let tools = value
         .as_array()
@@ -423,6 +507,11 @@ fn parse_tools(value: Option<&Value>) -> anyhow::Result<Option<Vec<GrokTool>>> {
                 "input_schema",
                 "cache_control",
                 "eager_input_streaming",
+                "max_uses",
+                "type",
+                "allowed_domains",
+                "blocked_domains",
+                "user_location",
             ]
             .contains(&key.as_str())
             {
@@ -446,12 +535,43 @@ fn parse_tools(value: Option<&Value>) -> anyhow::Result<Option<Vec<GrokTool>>> {
         if !names.insert(name.to_string()) {
             anyhow::bail!("duplicate tool name");
         }
-        if name == "WebSearch" {
-            out.push(GrokTool::hosted("web_search"));
+        let kind = match obj.get("type") {
+            None => None,
+            Some(Value::String(kind)) if !kind.is_empty() => Some(kind.as_str()),
+            Some(_) => anyhow::bail!("tool type is invalid"),
+        };
+        if let Some(max_uses) = obj.get("max_uses")
+            && !max_uses.is_null()
+            && max_uses.as_u64().is_none_or(|value| value == 0)
+        {
+            anyhow::bail!("tool max_uses must be a positive integer or null");
+        }
+        if let Some(kind) = kind {
+            if kind != "web_search_20250305" || name != "web_search" {
+                anyhow::bail!("unsupported tool type: {kind}");
+            }
+            for field in ["allowed_domains", "blocked_domains", "user_location"] {
+                if obj.get(field).is_some_and(|value| !value.is_null()) {
+                    anyhow::bail!("Grok hosted web search does not support {field}");
+                }
+            }
+            out.push(GrokTool::hosted_named("web_search", name));
             continue;
         }
-        if name == "XSearch" {
-            out.push(GrokTool::hosted("x_search"));
+        for field in ["allowed_domains", "blocked_domains", "user_location"] {
+            if obj.contains_key(field) {
+                anyhow::bail!("unsupported tool field: {field}");
+            }
+        }
+        if obj.contains_key("max_uses") && name != "WebSearch" {
+            anyhow::bail!("unsupported tool field: max_uses");
+        }
+        if hosted_search && name == "WebSearch" {
+            out.push(GrokTool::hosted_named("web_search", name));
+            continue;
+        }
+        if hosted_search && name == "XSearch" {
+            out.push(GrokTool::hosted_named("x_search", name));
             continue;
         }
         let parameters = obj
@@ -472,7 +592,7 @@ fn parse_tools(value: Option<&Value>) -> anyhow::Result<Option<Vec<GrokTool>>> {
 
 fn parse_tool_choice(
     value: Option<&Value>,
-    tools: Option<&Vec<GrokTool>>,
+    tools: &mut Option<Vec<GrokTool>>,
 ) -> anyhow::Result<Option<GrokToolChoice>> {
     let Some(value) = value else { return Ok(None) };
     let obj = value
@@ -509,15 +629,23 @@ fn parse_tool_choice(
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("tool_choice name is invalid"))?;
-            if !tools
-                .is_some_and(|items| items.iter().any(|tool| tool.name.as_deref() == Some(name)))
-            {
-                anyhow::bail!("tool_choice references an unknown tool");
+            let selected = tools
+                .as_ref()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|tool| tool.choice_name.as_deref() == Some(name))
+                })
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("tool_choice references an unknown tool"))?;
+            if selected.kind == "function" {
+                return Ok(Some(GrokToolChoice::Function {
+                    r#type: "function".into(),
+                    name: name.into(),
+                }));
             }
-            Ok(Some(GrokToolChoice::Function {
-                r#type: "function".into(),
-                name: name.into(),
-            }))
+            *tools = Some(vec![selected]);
+            Ok(Some(GrokToolChoice::Required("required".into())))
         }
         _ => anyhow::bail!("unsupported tool_choice"),
     }
@@ -1122,6 +1250,35 @@ fn flush_message(role: &str, content: &mut Vec<GrokContentPart>, out: &mut Vec<G
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Translate with an explicit hosted-search setting. Reading
+    /// `CCP_GROK_HOSTED_SEARCH` from the environment would make these tests
+    /// depend on the shell that ran them, so they pass the flag directly.
+    fn translate_search(
+        req: &MessagesRequest,
+        model: &str,
+        hosted_search: bool,
+    ) -> serde_json::Value {
+        serde_json::to_value(
+            translate_request_with_options(
+                req,
+                model.into(),
+                crate::config::GrokToolImageMode::Omit,
+                hosted_search,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn translate_hosted(req: &MessagesRequest, model: &str) -> serde_json::Value {
+        translate_search(req, model, true)
+    }
+
+    fn translate_client_search(req: &MessagesRequest, model: &str) -> serde_json::Value {
+        translate_search(req, model, false)
+    }
+
     #[test]
     fn grok_translation_replays_hosted_search_history() {
         let request: MessagesRequest = serde_json::from_value(serde_json::json!({
@@ -1165,6 +1322,53 @@ mod tests {
         assert_eq!(value["tool_choice"]["type"], "function");
     }
     #[test]
+    fn grok_translation_forwards_reasoning_effort() {
+        let cases = [
+            ("grok-4.5", "none", "none"),
+            ("grok-4.5", "low", "low"),
+            ("grok-4.5", "high", "high"),
+            ("grok-4.5", "xhigh", "high"),
+            ("grok-4.5", "max", "high"),
+            ("grok-4.6", "xhigh", "xhigh"),
+            ("grok-4.6", "max", "xhigh"),
+        ];
+        for (model, requested, expected) in cases {
+            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model": model,
+                "messages": [{"role":"user","content":"hello"}],
+                "output_config": {"effort": requested}
+            }))
+            .unwrap();
+            let value =
+                serde_json::to_value(translate_request(&request, model.into()).unwrap()).unwrap();
+            assert_eq!(value["reasoning"]["effort"], expected);
+        }
+    }
+
+    #[test]
+    fn grok_translation_omits_reasoning_without_effort() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"hello"}]
+        }))
+        .unwrap();
+        let value =
+            serde_json::to_value(translate_request(&request, "grok-4.5".into()).unwrap()).unwrap();
+        assert!(value.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn grok_translation_rejects_unknown_reasoning_effort() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"hello"}],
+            "output_config": {"effort": "invalid"}
+        }))
+        .unwrap();
+        assert!(translate_request(&request, "grok-4.5".into()).is_err());
+    }
+
+    #[test]
     fn grok_translation_maps_claude_web_search_to_hosted_web_search() {
         let request: MessagesRequest = serde_json::from_value(serde_json::json!({
             "model":"grok-4.5",
@@ -1176,8 +1380,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let translated =
-            serde_json::to_value(translate_request(&request, "grok-4.5".into()).unwrap()).unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
         assert_eq!(
             translated["tools"],
             serde_json::json!([{"type":"web_search"}])
@@ -1192,6 +1395,27 @@ mod tests {
     }
 
     #[test]
+    fn grok_translation_keeps_client_web_search_tool_by_default() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"search online for the project"}],
+            "tools":[{
+                "name":"WebSearch",
+                "description":"Search the web",
+                "input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+            }]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        // Caller-managed search remains a function tool.
+        assert_eq!(translated["tools"][0]["type"], "function");
+        assert_eq!(translated["tools"][0]["name"], "WebSearch");
+        assert_eq!(translated["tools"].as_array().unwrap().len(), 1);
+        assert!(!translated.to_string().contains("\"web_search\""));
+        assert!(!translated.to_string().contains("\"x_search\""));
+    }
+
+    #[test]
     fn grok_translation_maps_x_intent_to_required_hosted_x_search() {
         let request: MessagesRequest = serde_json::from_value(serde_json::json!({
             "model":"grok-4.5",
@@ -1202,14 +1426,63 @@ mod tests {
             ]
         }))
         .unwrap();
-        let translated =
-            serde_json::to_value(translate_request(&request, "grok-4.5".into()).unwrap()).unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
         assert_eq!(
             translated["tools"],
             serde_json::json!([{"type":"x_search"}])
         );
         assert_eq!(translated["tool_choice"], "required");
         assert!(!translated.to_string().contains("\"name\":\"Bash\""));
+    }
+
+    #[test]
+    fn grok_translation_offers_x_search_without_forcing_it() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"Search X for recent posts mentioning claude-code-proxy"}],
+            "tools":[
+                {"name":"Bash","description":"Run a command","input_schema":{"type":"object"}},
+                {"name":"WebSearch","description":"Search the web","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        // X-specific turns receive one additional hosted capability.
+        let tools = translated["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert!(tools.iter().any(|t| t["name"] == "Bash"));
+        assert!(tools.iter().any(|t| t["name"] == "WebSearch"));
+        assert!(tools.iter().any(|t| t["type"] == "x_search"));
+        assert!(translated["tool_choice"].is_null());
+        assert!(!translated.to_string().contains("use the hosted x_search"));
+    }
+
+    #[test]
+    fn grok_translation_offers_no_x_search_without_x_intent() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"read the config file"}],
+            "tools":[{"name":"Bash","description":"Run a command","input_schema":{"type":"object"}}]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        assert_eq!(translated["tools"].as_array().unwrap().len(), 1);
+        assert!(!translated.to_string().contains("x_search"));
+    }
+
+    #[test]
+    fn grok_translation_requires_phrase_boundaries_for_x_search() {
+        for text in ["use unix search for files", "run a linux search command"] {
+            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model":"grok-4.5",
+                "messages":[{"role":"user","content":text}],
+                "tools":[{"name":"Bash","description":"Run a command","input_schema":{"type":"object"}}]
+            }))
+            .unwrap();
+            let translated = translate_client_search(&request, "grok-4.5");
+            assert_eq!(translated["tools"].as_array().unwrap().len(), 1);
+            assert!(!translated.to_string().contains("x_search"));
+        }
     }
 
     #[test]
@@ -1234,13 +1507,98 @@ mod tests {
             }]
         }))
         .unwrap();
-        let translated =
-            serde_json::to_value(translate_request(&request, "grok-4.5".into()).unwrap()).unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
         assert_eq!(
             translated["tools"],
             serde_json::json!([{"type":"x_search"}])
         );
         assert_eq!(translated["tool_choice"], "required");
+    }
+
+    #[test]
+    fn grok_translation_omits_x_search_guidance_without_x_intent() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"hi"}]
+        }))
+        .unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
+        assert_eq!(translated["instructions"], "rules");
+        assert_eq!(
+            translated["tools"],
+            serde_json::json!([{"type":"x_search"}])
+        );
+        assert!(translated["tool_choice"].is_null());
+    }
+
+    #[test]
+    fn grok_translation_attaches_no_search_tool_to_a_greeting_by_default() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"hi"}]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        assert_eq!(translated["instructions"], "rules");
+        assert!(translated["tools"].as_array().is_none_or(|t| t.is_empty()));
+        assert!(translated["tool_choice"].is_null());
+    }
+
+    #[test]
+    fn grok_translation_appends_x_search_guidance_on_x_intent() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"search twitter for the outage"}]
+        }))
+        .unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
+        let instructions = translated["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with("rules"));
+        assert!(instructions.contains("use the hosted x_search tool"));
+    }
+
+    #[test]
+    fn grok_translation_appends_x_search_guidance_for_dedicated_x_tool() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"hi"}],
+            "tools":[{
+                "name":"XSearch",
+                "description":"Search X posts",
+                "input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+            }]
+        }))
+        .unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
+        assert!(
+            translated["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("use the hosted x_search tool")
+        );
+    }
+
+    #[test]
+    fn grok_translation_keeps_dedicated_xsearch_as_a_function_by_default() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"hi"}],
+            "tools":[{
+                "name":"XSearch",
+                "description":"Search X posts",
+                "input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+            }]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        assert_eq!(translated["tools"][0]["type"], "function");
+        assert_eq!(translated["tools"][0]["name"], "XSearch");
+        assert_eq!(translated["instructions"], "rules");
     }
 
     #[test]
@@ -1382,6 +1740,207 @@ mod tests {
                 {"type":"tool_result","tool_use_id":"call_1","content":[child]}
             ]));
             assert!(translate_request(&request, "grok-4.5".into()).is_err());
+        }
+    }
+
+    #[test]
+    fn grok_translation_accepts_web_search_max_uses_without_forwarding_it() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"find it"}],
+            "tools":[{
+                "name":"WebSearch",
+                "description":"Search the web",
+                "max_uses":6,
+                "input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+            }]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        assert_eq!(translated["tools"][0]["name"], "WebSearch");
+        assert!(!translated.to_string().contains("max_uses"));
+    }
+
+    #[test]
+    fn grok_translation_maps_the_anthropic_server_web_search_declaration() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"find it"}],
+            "tools":[
+                {"name":"Bash","description":"Run a command","input_schema":{"type":"object"}},
+                {"type":"web_search_20250305","name":"web_search","max_uses":8}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        let tools = translated["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert!(tools.iter().any(|t| t["name"] == "Bash"));
+        assert!(tools.iter().any(|t| t["type"] == "web_search"));
+        assert!(!translated.to_string().contains("web_search_20250305"));
+        assert!(!translated.to_string().contains("max_uses"));
+    }
+
+    #[test]
+    fn grok_translation_forces_a_named_hosted_web_search() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"find it"}],
+            "tools":[
+                {"name":"Bash","description":"Run a command","input_schema":{"type":"object"}},
+                {"type":"web_search_20250305","name":"web_search","max_uses":8}
+            ],
+            "tool_choice":{"type":"tool","name":"web_search"}
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        assert_eq!(
+            translated["tools"],
+            serde_json::json!([{"type":"web_search"}])
+        );
+        assert_eq!(translated["tool_choice"], "required");
+    }
+
+    #[test]
+    fn grok_translation_rejects_unsupported_hosted_web_search_options() {
+        for (field, value) in [
+            ("allowed_domains", serde_json::json!(["example.com"])),
+            ("blocked_domains", serde_json::json!(["example.com"])),
+            (
+                "user_location",
+                serde_json::json!({"type":"approximate","country":"GB"}),
+            ),
+        ] {
+            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model":"grok-4.5",
+                "messages":[{"role":"user","content":"find it"}],
+                "tools":[{"type":"web_search_20250305","name":"web_search",(field):value}]
+            }))
+            .unwrap();
+            let error = translate_request_with_options(
+                &request,
+                "grok-4.5".into(),
+                crate::config::GrokToolImageMode::Omit,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert_eq!(
+                error,
+                format!("Grok hosted web search does not support {field}")
+            );
+        }
+    }
+
+    #[test]
+    fn grok_translation_accepts_null_hosted_web_search_options() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"find it"}],
+            "tools":[{
+                "type":"web_search_20250305",
+                "name":"web_search",
+                "allowed_domains":null,
+                "blocked_domains":null,
+                "user_location":null
+            }]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        assert_eq!(
+            translated["tools"],
+            serde_json::json!([{"type":"web_search"}])
+        );
+    }
+
+    #[test]
+    fn grok_translation_rejects_an_unknown_server_tool_type() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"run it"}],
+            "tools":[{"type":"code_execution_20260120","name":"code_execution"}]
+        }))
+        .unwrap();
+        let error = translate_request_with_options(
+            &request,
+            "grok-4.5".into(),
+            crate::config::GrokToolImageMode::Omit,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "unsupported tool type: code_execution_20260120");
+    }
+
+    #[test]
+    fn grok_translation_rejects_a_server_tool_type_it_does_not_know_exactly() {
+        // The mapping requires both the supported version and canonical name.
+        for (kind, name) in [
+            ("web_search_20991231", "web_search"),
+            ("web_search_20250305", "MyOwnSearch"),
+        ] {
+            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model":"grok-4.5",
+                "messages":[{"role":"user","content":"find it"}],
+                "tools":[{"type":kind,"name":name}]
+            }))
+            .unwrap();
+            let error = translate_request_with_options(
+                &request,
+                "grok-4.5".into(),
+                crate::config::GrokToolImageMode::Omit,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert_eq!(error, format!("unsupported tool type: {kind}"));
+        }
+    }
+
+    #[test]
+    fn grok_translation_still_rejects_an_unknown_tool_field() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"find it"}],
+            "tools":[{"name":"WebSearch","input_schema":{"type":"object"},"invented":1}]
+        }))
+        .unwrap();
+        let error = translate_request_with_options(
+            &request,
+            "grok-4.5".into(),
+            crate::config::GrokToolImageMode::Omit,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "unsupported tool field: invented");
+    }
+
+    #[test]
+    fn grok_translation_rejects_invalid_or_misplaced_search_fields() {
+        let invalid = [
+            serde_json::json!({"type":null,"name":"Bash","input_schema":{"type":"object"}}),
+            serde_json::json!({"type":1,"name":"Bash","input_schema":{"type":"object"}}),
+            serde_json::json!({"name":"WebSearch","max_uses":0,"input_schema":{"type":"object"}}),
+            serde_json::json!({"name":"WebSearch","max_uses":"many","input_schema":{"type":"object"}}),
+            serde_json::json!({"name":"Bash","max_uses":2,"input_schema":{"type":"object"}}),
+        ];
+        for tool in invalid {
+            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model":"grok-4.5",
+                "messages":[{"role":"user","content":"run it"}],
+                "tools":[tool]
+            }))
+            .unwrap();
+            assert!(
+                translate_request_with_options(
+                    &request,
+                    "grok-4.5".into(),
+                    crate::config::GrokToolImageMode::Omit,
+                    false,
+                )
+                .is_err()
+            );
         }
     }
 

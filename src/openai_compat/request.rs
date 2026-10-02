@@ -136,7 +136,7 @@ pub fn parse_request(
     } else {
         OpenAiResponseMetadata::default()
     };
-    let effort = parse_effort(surface, object)?;
+    let effort = parse_effort(surface, object, provider)?;
     validate_cursor(provider, session_id, stream, &messages, &tools)?;
 
     let mut extra = Map::new();
@@ -299,6 +299,7 @@ fn parse_max_tokens(
 fn parse_effort(
     surface: OpenAiSurface,
     object: &Map<String, Value>,
+    provider: &str,
 ) -> Result<Option<String>, OpenAiError> {
     let value = match surface {
         OpenAiSurface::ChatCompletions => object.get("reasoning_effort"),
@@ -325,15 +326,21 @@ fn parse_effort(
             }),
         )
     })?;
-    match effort {
-        "low" | "medium" | "high" | "xhigh" | "max" => Ok(Some(effort.to_string())),
-        _ => Err(OpenAiError::invalid(
+    let supported = if provider == "grok" {
+        ["none", "low", "medium", "high", "xhigh", "max"].as_slice()
+    } else {
+        ["low", "medium", "high", "xhigh", "max"].as_slice()
+    };
+    if supported.contains(&effort) {
+        Ok(Some(effort.to_string()))
+    } else {
+        Err(OpenAiError::invalid(
             format!("Unsupported reasoning effort: '{effort}'"),
             Some(match surface {
                 OpenAiSurface::ChatCompletions => "reasoning_effort",
                 OpenAiSurface::Responses => "reasoning.effort",
             }),
-        )),
+        ))
     }
 }
 
@@ -1232,6 +1239,51 @@ mod tests {
         assert_eq!(parsed.messages.extra["system"][0]["text"], "be concise");
         assert_eq!(parsed.messages.messages[1].content[0]["type"], "tool_use");
         assert_eq!(parsed.messages.extra["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn grok_effort_accepts_none_on_both_openai_surfaces() {
+        let chat = parse_request(
+            OpenAiSurface::ChatCompletions,
+            json!({
+                "model":"grok-4.5",
+                "messages":[{"role":"user","content":"hello"}],
+                "reasoning_effort":"none"
+            }),
+            "grok",
+            None,
+        )
+        .unwrap();
+        assert_eq!(chat.messages.extra["output_config"]["effort"], "none");
+
+        let responses = parse_request(
+            OpenAiSurface::Responses,
+            json!({
+                "model":"grok-4.5",
+                "input":"hello",
+                "reasoning":{"effort":"none"}
+            }),
+            "grok",
+            None,
+        )
+        .unwrap();
+        assert_eq!(responses.messages.extra["output_config"]["effort"], "none");
+    }
+
+    #[test]
+    fn non_grok_effort_rejects_none() {
+        let error = parse_request(
+            OpenAiSurface::ChatCompletions,
+            json!({
+                "model":"kimi-k2.6",
+                "messages":[{"role":"user","content":"hello"}],
+                "reasoning_effort":"none"
+            }),
+            "kimi",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.param.as_deref(), Some("reasoning_effort"));
     }
 
     #[test]
