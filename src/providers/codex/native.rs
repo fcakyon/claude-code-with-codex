@@ -19,7 +19,7 @@ use crate::traffic::{
 
 use super::client::{CodexError, CodexHttpClient};
 use super::translate::model_allowlist::{
-    ALLOWED_MODELS, MODEL_ALIASES, assert_allowed_model, full_lane_web_search_model,
+    ALLOWED_MODELS, alias_target, assert_allowed_model, full_lane_web_search_model,
     uses_responses_lite,
 };
 
@@ -144,12 +144,10 @@ fn resolve_native_model(requested: &str) -> (String, bool) {
         Some(base) if ALLOWED_MODELS.iter().any(|m| m == base) => (base, true),
         _ => (requested, false),
     };
-    let model = MODEL_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == requested)
-        .map(|(_, target)| *target)
-        .unwrap_or(requested);
-    (model.to_string(), priority)
+    (
+        alias_target(requested).unwrap_or(requested).to_string(),
+        priority,
+    )
 }
 
 fn has_native_hosted_web_search(object: &Map<String, Value>) -> bool {

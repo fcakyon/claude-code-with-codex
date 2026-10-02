@@ -1,3 +1,9 @@
+## v0.4.1 (2026-10-03)
+
+- Claude aliases sent to Codex resolve to the first preferred model the
+  account's Codex CLI catalog lists, so an account without `gpt-6-sol` still
+  gets a working Opus slot instead of an upstream model-not-found error.
+
 ## v0.4.0 (2026-10-02)
 
 - Merge upstream claude-code-proxy v0.1.33 through v0.1.43. Codex gains

@@ -51,7 +51,6 @@ use uuid::Uuid;
 
 const CLAUDE_AUTO_REVIEW_SYSTEM_PREFIX: &str =
     "You are a security monitor for autonomous AI coding agents.";
-const CODEX_AUTO_REVIEW_MODEL: &str = "gpt-6-luna";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AutoReviewRoute {
@@ -96,9 +95,13 @@ fn apply_auto_review_model(
         return None;
     }
 
-    let override_model = configured_model
-        .filter(|model| !model.is_empty())
-        .or((original_provider == "codex").then_some(CODEX_AUTO_REVIEW_MODEL))?;
+    let override_model =
+        configured_model
+            .filter(|model| !model.is_empty())
+            .or((original_provider == "codex").then(|| {
+                crate::providers::codex::translate::model_allowlist::alias_target("haiku")
+                    .expect("haiku is a codex alias")
+            }))?;
     let route = AutoReviewRoute {
         requested_model: body.model.clone()?,
         override_model: override_model.to_string(),
