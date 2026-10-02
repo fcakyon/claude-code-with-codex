@@ -10,7 +10,7 @@ Messages API, so the proxy speaks it too and forwards or translates each request
 
 - `claude-*` models go to Anthropic as a transparent passthrough that reuses
   Claude Code's own subscription login. No API key, no translation.
-- `gpt-5.6-*` (and the other codex ids) go to the Codex backend using the
+- `gpt-*` ids go to the Codex backend using the
   ChatGPT subscription that the Codex CLI already logged in.
 - `kimi-*`, `grok-*`, and `cursor*` ids go to their own translators.
 
@@ -27,6 +27,8 @@ changes made on top of it.
 - `src/registry.rs` picks a provider for each request. `claude-*` and the opus
   and sonnet aliases resolve to the Anthropic passthrough; other ids match a
   backend exactly; an unknown id returns a 400 that lists the supported ids.
+  Codex ids come from `model_allowlist::ALLOWED_MODELS`: the bundled list
+  plus the listed, API-capable slugs in the Codex CLI's `models_cache.json`.
 - `src/providers/anthropic/mod.rs` is the passthrough. It relays the original
   body and headers to `api.anthropic.com` and streams the reply back. It holds
   no Anthropic credentials.
