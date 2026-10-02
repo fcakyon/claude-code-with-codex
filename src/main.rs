@@ -381,7 +381,7 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     println!("  # Leave ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY unset: Claude Code");
     println!("  # forwards your Claude subscription login for claude-* models, and any");
     println!("  # token set here overrides it and breaks the Claude route (401).");
-    println!("  export ANTHROPIC_DEFAULT_OPUS_MODEL=\"claude-opus-4-8\"   # opus slot -> Claude");
+    println!("  export ANTHROPIC_DEFAULT_OPUS_MODEL=\"claude-opus-5-5\"   # opus slot -> Claude");
     println!(
         "  export ANTHROPIC_DEFAULT_SONNET_MODEL=\"gpt-5.6-terra\"  # sonnet slot -> a backend above"
     );

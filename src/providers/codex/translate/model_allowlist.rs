@@ -27,6 +27,7 @@ pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("sonnet", "gpt-5.6-terra"),
     ("claude-sonnet-4-6", "gpt-5.6-terra"),
     ("claude-sonnet-5", "gpt-5.6-terra"),
+    ("claude-sonnet-5-5", "gpt-5.6-terra"),
     ("opus", "gpt-6-sol"),
     ("claude-opus-4-7", "gpt-6-sol"),
     ("claude-opus-4-8", "gpt-6-sol"),
@@ -34,6 +35,7 @@ pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("claude-opus-5-5", "gpt-6-sol"),
     ("fable", "gpt-6-sol"),
     ("claude-fable-5", "gpt-6-sol"),
+    ("claude-fable-5-1", "gpt-6-sol"),
 ];
 
 #[derive(Debug, Clone)]
@@ -185,8 +187,10 @@ mod tests {
 
     #[test]
     fn sonnet_5_resolves_to_terra() {
-        let r = resolve_model_request("claude-sonnet-5");
-        assert_eq!(r.model, "gpt-5.6-terra");
+        for model in ["claude-sonnet-5", "claude-sonnet-5-5"] {
+            let r = resolve_model_request(model);
+            assert_eq!(r.model, "gpt-5.6-terra");
+        }
     }
 
     #[test]
@@ -205,7 +209,7 @@ mod tests {
 
     #[test]
     fn fable_5_resolves_to_sol() {
-        for model in ["fable", "claude-fable-5"] {
+        for model in ["fable", "claude-fable-5", "claude-fable-5-1"] {
             let r = resolve_model_request(model);
             assert_eq!(r.model, "gpt-6-sol");
         }

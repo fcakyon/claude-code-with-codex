@@ -16,6 +16,7 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
     "sonnet",
     "claude-sonnet-4-6",
     "claude-sonnet-5",
+    "claude-sonnet-5-5",
     "opus",
     "claude-opus-4-7",
     "claude-opus-4-8",
@@ -23,6 +24,7 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
     "claude-opus-5-5",
     "fable",
     "claude-fable-5",
+    "claude-fable-5-1",
 ];
 
 pub const CURSOR_PREFIXES: &[&str] = &["cursor:", "cursor-plan:", "cursor-ask:"];
@@ -386,10 +388,12 @@ mod tests {
         let registry = Registry::new(AliasProvider::Codex);
         for model in [
             "claude-sonnet-5",
+            "claude-sonnet-5-5",
             "claude-opus-5",
             "claude-opus-5-5",
             "fable",
             "claude-fable-5",
+            "claude-fable-5-1",
         ] {
             let p = registry.provider_for_model(model, None);
             assert!(p.is_some(), "{model} should route to a provider");

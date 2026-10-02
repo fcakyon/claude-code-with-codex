@@ -11,12 +11,14 @@ static ALIAS_TARGETS: once_cell::sync::Lazy<HashMap<&'static str, &'static str>>
         m.insert("sonnet", KIMI_DEFAULT_MODEL);
         m.insert("claude-sonnet-4-6", KIMI_DEFAULT_MODEL);
         m.insert("claude-sonnet-5", KIMI_DEFAULT_MODEL);
+        m.insert("claude-sonnet-5-5", KIMI_DEFAULT_MODEL);
         m.insert("opus", KIMI_DEFAULT_MODEL);
         m.insert("claude-opus-4-7", KIMI_DEFAULT_MODEL);
         m.insert("claude-opus-4-8", KIMI_DEFAULT_MODEL);
         m.insert("claude-opus-5", KIMI_DEFAULT_MODEL);
         m.insert("fable", KIMI_DEFAULT_MODEL);
         m.insert("claude-fable-5", KIMI_DEFAULT_MODEL);
+        m.insert("claude-fable-5-1", KIMI_DEFAULT_MODEL);
         m.insert("kimi-for-coding", KIMI_DEFAULT_MODEL);
         m.insert("kimi-k3", "k3");
         m.insert("k3", "k3");
