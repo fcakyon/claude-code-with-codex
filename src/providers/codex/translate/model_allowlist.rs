@@ -1,10 +1,14 @@
 use std::collections::HashSet;
 
+use once_cell::sync::Lazy;
+use serde_json::Value;
+
 use crate::config;
+use crate::providers::codex::auth::token_store::codex_auth_file;
 
 use super::request::ServiceTier;
 
-pub const ALLOWED_MODELS: &[&str] = &[
+const BUNDLED_MODELS: &[&str] = &[
     "gpt-5.2",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
@@ -19,6 +23,39 @@ pub const ALLOWED_MODELS: &[&str] = &[
     "gpt-6-sol",
     "gpt-6.1-sol",
 ];
+
+/// Models the Codex backend accepts: the bundled list plus whatever the Codex
+/// CLI last fetched into `models_cache.json` next to `auth.json`, so a model the
+/// account gains is usable without a release. Hidden and API-less entries stay
+/// out.
+pub static ALLOWED_MODELS: Lazy<Vec<String>> = Lazy::new(|| {
+    let mut models: Vec<String> = BUNDLED_MODELS.iter().map(|m| m.to_string()).collect();
+    let cache = std::fs::read(codex_auth_file().with_file_name("models_cache.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    models.extend(
+        cache
+            .as_ref()
+            .and_then(|cache| cache["models"].as_array())
+            .into_iter()
+            .flatten()
+            .filter(|m| m["visibility"] == "list" && m["supported_in_api"] == true)
+            .filter_map(|m| m["slug"].as_str().map(str::to_string)),
+    );
+    models.sort_unstable();
+    models.dedup();
+    models
+});
+
+/// Every accepted model plus its `-fast` priority alias, as listed to clients.
+pub fn listed_models() -> Vec<String> {
+    let mut models: Vec<String> = ALLOWED_MODELS
+        .iter()
+        .flat_map(|m| [m.clone(), format!("{m}-fast")])
+        .collect();
+    models.sort_unstable();
+    models
+}
 
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("haiku", "gpt-6-luna"),
@@ -114,7 +151,7 @@ impl std::fmt::Display for ModelNotAllowedError {
 }
 
 pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
-    if ALLOWED_MODELS.contains(&model) {
+    if ALLOWED_MODELS.iter().any(|m| m == model) {
         Ok(())
     } else {
         Err(ModelNotAllowedError {
@@ -123,16 +160,18 @@ pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
     }
 }
 
+/// Everything from GPT-5.6 on, including models discovered from the Codex CLI
+/// cache, runs on the Responses Lite lane. Only the older full-lane models are
+/// named.
 pub fn uses_responses_lite(model: &str) -> bool {
-    matches!(
+    !matches!(
         model,
-        "gpt-5.6-luna"
-            | "gpt-5.6-sol"
-            | "gpt-5.6-terra"
-            | "gpt-6-astra"
-            | "gpt-6-luna"
-            | "gpt-6-sol"
-            | "gpt-6.1-sol"
+        "gpt-5.2"
+            | "gpt-5.3-codex"
+            | "gpt-5.3-codex-spark"
+            | "gpt-5.4"
+            | "gpt-5.4-mini"
+            | "gpt-5.5"
     )
 }
 
@@ -149,7 +188,7 @@ pub fn full_lane_web_search_model(model: &str) -> &str {
 }
 
 pub fn is_valid_model_for_codex(model: &str) -> bool {
-    if ALLOWED_MODELS.contains(&model) {
+    if ALLOWED_MODELS.iter().any(|m| m == model) {
         return true;
     }
     let fast_set = fast_model_aliases();
@@ -229,6 +268,17 @@ mod tests {
         assert!(uses_responses_lite("gpt-6-sol"));
         assert!(uses_responses_lite("gpt-6-luna"));
         assert!(uses_responses_lite("gpt-6.1-sol"));
+        assert!(uses_responses_lite("gpt-7-new"));
+        assert!(!uses_responses_lite("gpt-5.5"));
+    }
+
+    #[test]
+    fn listed_models_pair_every_model_with_fast() {
+        let listed = listed_models();
+        for model in ALLOWED_MODELS.iter() {
+            assert!(listed.contains(model));
+            assert!(listed.contains(&format!("{model}-fast")));
+        }
     }
 
     #[test]

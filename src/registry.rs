@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use axum::{http::StatusCode, response::Response};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
@@ -40,22 +40,6 @@ const CURSOR_LEGACY_MODELS: &[&str] = &[
     "composer-2.5-fast",
 ];
 
-pub(crate) const CODEX_MODELS: &[&str] = &[
-    "gpt-5.2",
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.5",
-    "gpt-5.6-luna",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-6-astra",
-    "gpt-6-luna",
-    "gpt-6-sol",
-    "gpt-6.1-sol",
-];
-
 pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "kimi-k3", "k2.6", "k3"];
 pub(crate) const GROK_MODELS: &[&str] =
     &["grok-composer-2.5-fast", "grok-4.5", "grok-4.6", "grok-4.7"];
@@ -76,7 +60,10 @@ impl Registry {
                 .map(|alias| (*alias).to_string())
                 .collect(),
         );
-        models.insert("codex".into(), expand_codex_models());
+        models.insert(
+            "codex".into(),
+            crate::providers::codex::translate::model_allowlist::listed_models(),
+        );
         models.insert(
             "kimi".into(),
             KIMI_MODELS.iter().map(|m| (*m).to_string()).collect(),
@@ -332,22 +319,6 @@ const CODEX_CLI: PlaceholderCli = PlaceholderCli { provider: "codex" };
 const KIMI_CLI: PlaceholderCli = PlaceholderCli { provider: "kimi" };
 const CURSOR_CLI: PlaceholderCli = PlaceholderCli { provider: "cursor" };
 const GROK_CLI: PlaceholderCli = PlaceholderCli { provider: "grok" };
-fn expand_codex_models() -> Vec<String> {
-    let mut set = HashSet::new();
-    let mut out = Vec::new();
-    for model in CODEX_MODELS {
-        if set.insert((*model).to_string()) {
-            out.push((*model).to_string());
-        }
-        let fast = format!("{model}-fast");
-        if set.insert(fast.clone()) {
-            out.push(fast);
-        }
-    }
-    out.sort_unstable();
-    out
-}
-
 fn build_cursor_models() -> Vec<String> {
     let mut out: Vec<String> = CURSOR_LEGACY_MODELS
         .iter()

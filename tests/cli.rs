@@ -42,6 +42,26 @@ fn models_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn models_include_listed_codex_cli_cache_entries() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(
+        dir.path().join("models_cache.json"),
+        r#"{"models":[
+            {"slug":"gpt-7-toy","visibility":"list","supported_in_api":true},
+            {"slug":"gpt-hidden","visibility":"hide","supported_in_api":true},
+            {"slug":"gpt-noapi","visibility":"list","supported_in_api":false}]}"#,
+    )?;
+    let mut cmd = Command::cargo_bin("claude-codex")?;
+    cmd.env("CCP_CODEX_AUTH_FILE", dir.path().join("auth.json"));
+    cmd.arg("models");
+    let out = String::from_utf8(cmd.output()?.stdout)?;
+    assert!(out.contains("gpt-7-toy, gpt-7-toy-fast"));
+    assert!(!out.contains("gpt-hidden"));
+    assert!(!out.contains("gpt-noapi"));
+    Ok(())
+}
+
+#[test]
 fn help_describes_visible_commands_and_hides_demo() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin("claude-codex")?;
     cmd.arg("--help");
