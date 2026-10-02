@@ -141,7 +141,7 @@ fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
 
 fn resolve_native_model(requested: &str) -> (String, bool) {
     let (requested, priority) = match requested.strip_suffix("-fast") {
-        Some(base) if ALLOWED_MODELS.contains(&base) => (base, true),
+        Some(base) if ALLOWED_MODELS.iter().any(|m| m == base) => (base, true),
         _ => (requested, false),
     };
     let model = MODEL_ALIASES

@@ -29,7 +29,6 @@ use crate::config;
 use crate::logging::create_logger;
 use crate::monitor::usage_from_anthropic_sse;
 use crate::provider::{CliHandlers, Provider, RequestContext};
-use crate::registry;
 use crate::request_identity::ConversationIdentity;
 use crate::retry::{compute_backoff_delay, sleep};
 
@@ -524,16 +523,7 @@ impl Provider for CodexProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        let mut models: Vec<String> = registry::CODEX_MODELS
-            .iter()
-            .map(|m| m.to_string())
-            .collect();
-        for m in registry::CODEX_MODELS {
-            models.push(format!("{m}-fast"));
-        }
-        models.sort_unstable();
-        models.dedup();
-        models
+        translate::model_allowlist::listed_models()
     }
 
     fn cli(&self) -> &'static dyn CliHandlers {
