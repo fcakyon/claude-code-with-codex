@@ -26,8 +26,9 @@ Pick the bump from the user's words (patch, minor, major). Never skip a step.
 ## Release notes
 
 The body is GitHub's "What's Changed" format, one line per non-merge commit
-since the previous release, so commit subjects are the release notes. To
-regenerate an existing release:
+since the previous release, fork commits first, so commit subjects are the
+release notes. The upstream owner is named without an @ so syncs do not ping
+them. To regenerate an existing release:
 
 ```bash
 gh release edit vX.Y.Z --notes-file <(scripts/release-notes.sh vX.Y.Z)
