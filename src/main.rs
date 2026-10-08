@@ -385,6 +385,9 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     println!(
         "  export ANTHROPIC_DEFAULT_SONNET_MODEL=\"gpt-5.6-terra\"  # sonnet slot -> a backend above"
     );
+    println!(
+        "  export ANTHROPIC_DEFAULT_HAIKU_MODEL=\"claude-haiku-5-5\"  # small model -> Claude"
+    );
     println!("  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1");
 }
 

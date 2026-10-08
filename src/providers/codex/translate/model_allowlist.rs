@@ -74,6 +74,7 @@ pub const MODEL_ALIASES: &[(&str, &[&str])] = &[
     ("haiku", HAIKU_TARGETS),
     ("claude-haiku-4-5", HAIKU_TARGETS),
     ("claude-haiku-4-5-20251001", HAIKU_TARGETS),
+    ("claude-haiku-5-5", HAIKU_TARGETS),
     ("sonnet", SONNET_TARGETS),
     ("claude-sonnet-4-6", SONNET_TARGETS),
     ("claude-sonnet-5", SONNET_TARGETS),
@@ -241,6 +242,14 @@ mod tests {
         assert_eq!(full_lane_web_search_model("gpt-5.4"), "gpt-5.4");
         assert_eq!(full_lane_web_search_model("gpt-6-luna"), "gpt-6-sol");
         assert_eq!(full_lane_web_search_model("gpt-6-sol"), "gpt-6-sol");
+    }
+
+    #[test]
+    fn haiku_5_5_resolves_to_luna() {
+        assert_eq!(
+            resolve_model_request("claude-haiku-5-5").model,
+            "gpt-6-luna"
+        );
     }
 
     #[test]

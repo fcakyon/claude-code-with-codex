@@ -13,6 +13,7 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
     "haiku",
     "claude-haiku-4-5",
     "claude-haiku-4-5-20251001",
+    "claude-haiku-5-5",
     "sonnet",
     "claude-sonnet-4-6",
     "claude-sonnet-5",
