@@ -123,6 +123,7 @@ Claude Code after changing it so `/model` discovers the router's model list.
 | `ANTHROPIC_BASE_URL`                       | Point Claude Code at the proxy, e.g. `http://localhost:18765`.   |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`             | Optionally remap the Opus alias.                                 |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL`           | Optionally remap the Sonnet alias.                               |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL`            | Small background model, e.g. `claude-haiku-5-5` on Claude.       |
 | `ANTHROPIC_MODEL`                          | Optionally force one model for the whole session.                |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Set to `1` to skip Claude Code's non-essential background calls. |
 

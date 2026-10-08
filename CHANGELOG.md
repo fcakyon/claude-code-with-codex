@@ -1,3 +1,9 @@
+## v0.5.1 (2026-10-08)
+
+- Claude Haiku 5.5 (`claude-haiku-5-5`) is listed as a Claude model and maps to
+  the Haiku targets when aliases go to Codex. The startup banner and README
+  suggest it for `ANTHROPIC_DEFAULT_HAIKU_MODEL`.
+
 ## v0.5.0 (2026-10-08)
 
 - Merge upstream claude-code-proxy v0.1.44. Codex requests that repeatedly
