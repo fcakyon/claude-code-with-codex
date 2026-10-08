@@ -1,3 +1,10 @@
+## v0.5.0 (2026-10-08)
+
+- Merge upstream claude-code-proxy v0.1.44. Codex requests that repeatedly
+  produce no output now fail after the proxy's own retries, instead of Claude
+  Code retrying them again and hanging for up to half an hour.
+  ([#175](https://github.com/raine/claude-code-proxy/pull/175))
+
 ## v0.4.1 (2026-10-03)
 
 - Claude aliases sent to Codex resolve to the first preferred model the
