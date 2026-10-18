@@ -1,3 +1,10 @@
+## v0.6.0 (2026-10-18)
+
+- Merge upstream claude-code-proxy v0.1.45. Codex gains `-ultrafast` variants
+  for `gpt-6-astra` and `gpt-6.1-sol`, next to the existing `-fast` ones. A
+  model without that tier falls back to priority.
+  ([#170](https://github.com/raine/claude-code-proxy/pull/170))
+
 ## v0.5.1 (2026-10-08)
 
 - Claude Haiku 5.5 (`claude-haiku-5-5`) is listed as a Claude model and maps to
