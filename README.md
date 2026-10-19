@@ -126,12 +126,18 @@ Claude Code after changing it so `/model` discovers the router's model list.
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL`            | Small background model, e.g. `claude-haiku-5-5` on Claude.       |
 | `ANTHROPIC_MODEL`                          | Optionally force one model for the whole session.                |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Set to `1` to skip Claude Code's non-essential background calls. |
+| `ENABLE_TOOL_SEARCH`                       | Set to `true` to load MCP tool schemas only when a tool is used. |
 
 Do not set `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`. Either one overrides
 the Claude subscription login and the Claude route returns 401.
 
 The proxy listens on `127.0.0.1:18765` by default. Change it with
 `PORT=11435 claude-codex serve`, and match `ANTHROPIC_BASE_URL`.
+
+Claude Code turns tool search off behind a proxy, so every MCP tool schema rides
+along with every request. `ENABLE_TOOL_SEARCH=true` keeps it on. Codex gets each
+tool right where `ToolSearch` loaded it, so earlier input stays in the prompt
+cache.
 
 Alias remapping is optional. For example,
 `ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra` makes `/model sonnet` use Codex.
