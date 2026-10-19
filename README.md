@@ -164,7 +164,8 @@ Alias remapping is optional. For example,
 The same proxy can also route to **Kimi**, **Grok**, and **Cursor** models, each
 with its own login. Run `claude-codex models` to see the ids of every backend
 you are signed into and how to sign in to the rest, and
-`claude-codex <backend> auth status` to check a login. These backends keep the
+`claude-codex <backend> auth status` to check a login. Cursor reuses an existing
+`cursor-agent login`, so no second login is needed. These backends keep the
 behavior of the upstream project this is based on.
 
 ## Limitations

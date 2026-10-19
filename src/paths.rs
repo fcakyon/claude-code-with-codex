@@ -88,6 +88,26 @@ pub fn cursor_auth_file(deps: &DirResolverEnv) -> PathBuf {
     resolve_config_dir(deps).join("cursor").join("auth.json")
 }
 
+/// Where `cursor-agent login` keeps its token when it writes a file, not the Keychain.
+pub fn cursor_agent_auth_file(deps: &DirResolverEnv) -> PathBuf {
+    let base = |var: &str, fallback: &str| {
+        PathBuf::from(
+            deps.env
+                .get(var)
+                .cloned()
+                .unwrap_or_else(|| format!("{}{fallback}", deps.home)),
+        )
+    };
+    let dir = if cfg!(target_os = "macos") {
+        PathBuf::from(&deps.home).join(".cursor")
+    } else if cfg!(windows) {
+        base("APPDATA", "\\AppData\\Roaming").join("Cursor")
+    } else {
+        base("XDG_CONFIG_HOME", "/.config").join("cursor")
+    };
+    dir.join("auth.json")
+}
+
 pub fn kimi_device_id_file(deps: &DirResolverEnv) -> PathBuf {
     resolve_config_dir(deps).join("kimi").join("device_id")
 }

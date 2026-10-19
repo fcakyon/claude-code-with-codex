@@ -2,9 +2,12 @@ use base64::Engine;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::auth::{AuthStorage, KeychainFileAuthStore, SystemKeychain};
+use crate::auth::{
+    AuthStorage, Keychain, KeychainFileAuthStore, SystemKeychain, load_auth_file_value,
+};
 use crate::{config, paths};
 
 pub const KEYCHAIN_SERVICE: &str = "claude-code-proxy.cursor";
@@ -125,16 +128,48 @@ pub fn file_store() -> CursorTokenStore<DefaultCursorAuthStore> {
 
 pub fn load_cursor_auth() -> anyhow::Result<Option<CursorAuth>> {
     if let Some(token) = env_cursor_token() {
-        return Ok(Some(enrich(
-            StoredCursorAuth {
-                access_token: token,
-                refresh_token: None,
-                api_key: None,
-            },
-            "environment".to_string(),
-        )));
+        return Ok(Some(borrowed_auth(token, "environment")));
     }
-    file_store().load_auth()
+    if let Some(auth) = file_store().load_auth()? {
+        return Ok(Some(auth));
+    }
+    Ok(cursor_agent_token().map(|token| borrowed_auth(token, "cursor-agent")))
+}
+
+fn borrowed_auth(token: String, source: &str) -> CursorAuth {
+    enrich(
+        StoredCursorAuth {
+            access_token: token,
+            refresh_token: None,
+            api_key: None,
+        },
+        source.to_string(),
+    )
+}
+
+/// The token `cursor-agent login` saved. Read fresh on each use and never copied,
+/// because cursor-agent refreshes it on its own schedule.
+fn cursor_agent_token() -> Option<String> {
+    uses_system_stores()
+        .then(|| {
+            let auth_file = paths::cursor_agent_auth_file(&paths::DirResolverEnv::default());
+            read_cursor_agent_token(&auth_file, &SystemKeychain)
+        })
+        .flatten()
+}
+
+/// cursor-agent keeps the token in its auth.json, or in the macOS Keychain.
+fn read_cursor_agent_token(auth_file: &Path, keychain: &impl Keychain) -> Option<String> {
+    load_auth_file_value(auth_file)
+        .and_then(|doc| doc["accessToken"].as_str().map(str::to_owned))
+        .or_else(|| {
+            keychain
+                .read("cursor-access-token", "cursor-user")
+                .ok()
+                .flatten()
+        })
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
 }
 
 /// Load only the bearer token for call sites that do not need auth metadata.
@@ -160,8 +195,7 @@ pub fn cursor_auth_location() -> String {
 pub fn missing_auth_message() -> String {
     [
         "Cursor authentication was not found.",
-        "Run `claude-codex cursor auth login`, or set CCP_CURSOR_AUTH_TOKEN/CURSOR_AUTH_TOKEN.",
-        "The proxy stores Cursor credentials in its own claude-code-proxy.cursor storage, not Cursor Agent's Keychain/auth.json.",
+        "Run `cursor-agent login` or `claude-codex cursor auth login`, or set CCP_CURSOR_AUTH_TOKEN/CURSOR_AUTH_TOKEN.",
     ]
     .join(" ")
 }
@@ -363,8 +397,13 @@ fn base64_url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// A custom `CCP_CONFIG_DIR` keeps the proxy off the system Keychain and other tools' logins.
+fn uses_system_stores() -> bool {
+    std::env::var_os("CCP_CONFIG_DIR").is_none()
+}
+
 fn use_macos_keychain() -> bool {
-    cfg!(target_os = "macos") && std::env::var_os("CCP_CONFIG_DIR").is_none()
+    cfg!(target_os = "macos") && uses_system_stores()
 }
 
 fn now_ms() -> u64 {
@@ -387,7 +426,39 @@ fn format_unix_ms(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::InMemoryAuthStore;
+    use crate::auth::{InMemoryAuthStore, StubKeychain};
+
+    struct CursorAgentKeychain;
+
+    impl Keychain for CursorAgentKeychain {
+        fn read(&self, _service: &str, _account: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some(" keychain-token\n".to_string()))
+        }
+
+        fn write(&self, _service: &str, _account: &str, _value: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn delete(&self, _service: &str, _account: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cursor_agent_token_prefers_its_auth_file_then_the_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        assert_eq!(read_cursor_agent_token(&file, &StubKeychain), None);
+        assert_eq!(
+            read_cursor_agent_token(&file, &CursorAgentKeychain).as_deref(),
+            Some("keychain-token")
+        );
+        std::fs::write(&file, r#"{"accessToken":"file-token"}"#).unwrap();
+        assert_eq!(
+            read_cursor_agent_token(&file, &CursorAgentKeychain).as_deref(),
+            Some("file-token")
+        );
+    }
 
     #[test]
     fn auth_uses_cursor_auth_token_env() {

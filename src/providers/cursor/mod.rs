@@ -62,6 +62,14 @@ impl Provider for CursorProvider {
         "cursor"
     }
 
+    fn missing_login_hint(&self) -> Option<&'static str> {
+        load_cursor_auth()
+            .ok()
+            .flatten()
+            .is_none()
+            .then_some("run `cursor-agent login` or `claude-codex cursor auth login`")
+    }
+
     fn supported_models(&self) -> Vec<String> {
         model::cursor_supported_models()
     }
