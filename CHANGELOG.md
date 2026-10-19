@@ -1,3 +1,18 @@
+## v0.7.0 (2026-10-19)
+
+- With `ENABLE_TOOL_SEARCH=true`, Codex gets each MCP tool where `ToolSearch`
+  loaded it, so earlier input stays in the prompt cache and the search result
+  names the tool instead of reading as omitted.
+  ([#184](https://github.com/raine/claude-code-proxy/pull/184))
+- `CCP_AUTH_TOKEN` (or `authToken` in `config.json`) requires a token on every
+  route except `/healthz` and `/monitor`. Claude Code sends it through
+  `ANTHROPIC_CUSTOM_HEADERS` as `x-claude-codex-key`, so the Claude login keeps
+  working.
+- `claude-codex models`, the startup banner, and the unknown-model error list
+  only backends with a login and say how to sign in to the rest.
+- The Cursor backend reuses an existing `cursor-agent login` from its
+  `auth.json` or the macOS Keychain, so no second login is needed.
+
 ## v0.6.0 (2026-10-18)
 
 - Merge upstream claude-code-proxy v0.1.45. Codex gains `-ultrafast` variants
