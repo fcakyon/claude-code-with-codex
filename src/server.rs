@@ -171,6 +171,13 @@ pub async fn serve_listener(
         ])),
     );
     let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
+    let app = match crate::config::auth_token() {
+        Some(token) => app.layer(axum::middleware::from_fn_with_state(
+            Arc::<str>::from(token),
+            crate::inbound_auth::require_token,
+        )),
+        None => app,
+    };
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

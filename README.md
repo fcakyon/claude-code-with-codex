@@ -139,6 +139,22 @@ along with every request. `ENABLE_TOOL_SEARCH=true` keeps it on. Codex gets each
 tool right where `ToolSearch` loaded it, so earlier input stays in the prompt
 cache.
 
+To reach the proxy from another machine, set `CCP_BIND_ADDRESS=0.0.0.0` and a
+token with `CCP_AUTH_TOKEN` (or `"authToken"` in
+`~/.config/claude-code-proxy/config.json`). Claude Code sends the token in its
+own header, so the Claude login keeps working:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://proxy-host:18765",
+    "ANTHROPIC_CUSTOM_HEADERS": "x-claude-codex-key: <token>"
+  }
+}
+```
+
+OpenAI-compatible clients can send it as `Authorization: Bearer <token>`.
+
 Alias remapping is optional. For example,
 `ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra` makes `/model sonnet` use Codex.
 

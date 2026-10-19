@@ -46,6 +46,8 @@ struct FileConfig {
     pub codex: Option<CodexConfig>,
     pub cursor: Option<CursorConfig>,
     pub grok: Option<GrokConfig>,
+    #[serde(rename = "authToken")]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -492,6 +494,15 @@ pub fn grok_search_blocks() -> GrokSearchBlocks {
 
 pub fn is_verbose() -> bool {
     log_verbose()
+}
+
+/// Token required on the proxy's own routes. Unset or blank leaves them open.
+pub fn auth_token() -> Option<String> {
+    std::env::var("CCP_AUTH_TOKEN")
+        .ok()
+        .or_else(|| read_file_config(&paths::config_dir())?.auth_token)
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
 }
 
 pub fn anthropic_base_url() -> String {

@@ -285,6 +285,16 @@ where
     }
 }
 
+pub fn constant_time_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.bytes()
+        .zip(right.bytes())
+        .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
+}
+
 pub fn load_auth_file<T: DeserializeOwned>(path: &str) -> Option<T> {
     let mut file = File::open(path).ok()?;
     let mut raw = String::new();

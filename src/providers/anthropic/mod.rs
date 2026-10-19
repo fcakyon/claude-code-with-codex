@@ -132,7 +132,7 @@ fn detect_hosted_web_search_regression(obj: &serde_json::Map<String, Value>, req
 /// connection-scoped; `content-length` is recomputed by the client from the body; and
 /// `accept-encoding` is dropped so the upstream answers with an identity encoding
 /// (this build of reqwest does not decompress, so forwarding a compressed body under a
-/// stale `content-encoding` would corrupt it).
+/// stale `content-encoding` would corrupt it). The proxy's own token never leaves it.
 fn is_stripped_request_header(name: &str) -> bool {
     matches!(
         name,
@@ -147,6 +147,7 @@ fn is_stripped_request_header(name: &str) -> bool {
             | "upgrade"
             | "content-length"
             | "accept-encoding"
+            | crate::inbound_auth::PROXY_KEY_HEADER
     )
 }
 
@@ -322,6 +323,9 @@ mod tests {
         assert!(is_stripped_request_header("content-length"));
         assert!(is_stripped_request_header("accept-encoding"));
         assert!(is_stripped_request_header("connection"));
+        assert!(is_stripped_request_header(
+            crate::inbound_auth::PROXY_KEY_HEADER
+        ));
         // credentials and cache-relevant headers must survive
         assert!(!is_stripped_request_header("authorization"));
         assert!(!is_stripped_request_header("anthropic-beta"));

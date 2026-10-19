@@ -8,7 +8,7 @@ use url::Url;
 
 use super::pkce::{PkceCodes, generate_pkce, generate_state};
 use super::token_store::{GrokTokenStore, StoredAuth};
-use crate::auth::AuthStorage;
+use crate::auth::{AuthStorage, constant_time_eq};
 
 pub const CANONICAL_ISSUER: &str = "https://auth.x.ai";
 pub const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
@@ -260,16 +260,6 @@ fn callback(stream: &mut TcpStream, expected_state: &str) -> Callback {
         "Authorization received. Return to the terminal.",
     );
     Callback::Code(code.unwrap().clone())
-}
-
-fn constant_time_eq(left: &str, right: &str) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.bytes()
-        .zip(right.bytes())
-        .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
-        == 0
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: &str) {
