@@ -142,6 +142,14 @@ impl Registry {
         models
     }
 
+    /// Backends without a login, with how to sign in.
+    pub fn signed_out(&self) -> BTreeMap<&str, &'static str> {
+        self.handlers
+            .iter()
+            .filter_map(|(name, provider)| Some((name.as_str(), provider.missing_login_hint()?)))
+            .collect()
+    }
+
     pub fn all_supported_models(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for provider in self.handlers.keys() {
@@ -195,13 +203,25 @@ impl Registry {
     }
 
     pub fn unknown_model_message(&self) -> String {
+        let signed_out = self.signed_out();
         let mut parts = Vec::new();
         for (provider, models) in self.grouped_models() {
+            if signed_out.contains_key(provider.as_str()) {
+                continue;
+            }
             let mut models = models;
             models.sort_unstable();
             parts.push(format!("{}: {}", provider, models.join(", ")));
         }
-        format!("Supported: {}.", parts.join("; "))
+        let mut message = format!("Supported: {}.", parts.join("; "));
+        if !signed_out.is_empty() {
+            let hints: Vec<String> = signed_out
+                .iter()
+                .map(|(provider, hint)| format!("{provider} ({hint})"))
+                .collect();
+            message.push_str(&format!(" Not signed in: {}.", hints.join("; ")));
+        }
+        message
     }
 }
 
@@ -332,6 +352,69 @@ fn build_cursor_models() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SignedOut(PlaceholderProvider);
+
+    #[async_trait]
+    impl Provider for SignedOut {
+        fn name(&self) -> &'static str {
+            self.0.name()
+        }
+
+        fn supported_models(&self) -> Vec<String> {
+            self.0.supported_models()
+        }
+
+        fn cli(&self) -> &'static dyn CliHandlers {
+            self.0.cli()
+        }
+
+        fn missing_login_hint(&self) -> Option<&'static str> {
+            Some("run `claude-codex kimi auth login`")
+        }
+
+        async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
+            self.0.handle_messages(body, ctx).await
+        }
+
+        async fn handle_count_tokens(
+            &self,
+            body: MessagesRequest,
+            ctx: RequestContext,
+        ) -> Response {
+            self.0.handle_count_tokens(body, ctx).await
+        }
+    }
+
+    #[test]
+    fn signed_out_backends_are_named_instead_of_listed() {
+        let registry = Registry::from_providers(
+            AliasProvider::Codex,
+            [
+                Arc::new(PlaceholderProvider::new("codex", vec!["gpt-toy".into()]))
+                    as Arc<dyn Provider>,
+                Arc::new(SignedOut(PlaceholderProvider::new(
+                    "kimi",
+                    vec!["kimi-toy".into()],
+                ))),
+            ],
+        );
+
+        assert_eq!(
+            registry.signed_out(),
+            BTreeMap::from([("kimi", "run `claude-codex kimi auth login`")])
+        );
+        assert_eq!(
+            registry
+                .provider_for_model("kimi-toy", None)
+                .unwrap()
+                .name(),
+            "kimi"
+        );
+        let message = registry.unknown_model_message();
+        assert!(message.contains("gpt-toy") && !message.contains("kimi-toy"));
+        assert!(message.ends_with("Not signed in: kimi (run `claude-codex kimi auth login`)."));
+    }
 
     #[test]
     fn normalize_model_trims_hint() {

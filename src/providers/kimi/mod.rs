@@ -50,6 +50,15 @@ impl Provider for KimiProvider {
         "kimi"
     }
 
+    fn missing_login_hint(&self) -> Option<&'static str> {
+        file_store()
+            .load_auth()
+            .ok()
+            .flatten()
+            .is_none()
+            .then_some("run `claude-codex kimi auth login`")
+    }
+
     fn supported_models(&self) -> Vec<String> {
         KIMI_MODELS.iter().map(|s| s.to_string()).collect()
     }

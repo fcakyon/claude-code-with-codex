@@ -70,6 +70,15 @@ impl Provider for GrokProvider {
     fn name(&self) -> &'static str {
         "grok"
     }
+
+    fn missing_login_hint(&self) -> Option<&'static str> {
+        file_store()
+            .load_auth()
+            .ok()
+            .flatten()
+            .is_none()
+            .then_some("run `claude-codex grok auth login`")
+    }
     fn supported_models(&self) -> Vec<String> {
         GROK_MODELS
             .iter()

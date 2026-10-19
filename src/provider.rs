@@ -26,6 +26,13 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
     fn supported_models(&self) -> Vec<String>;
     fn cli(&self) -> &'static dyn CliHandlers;
+
+    /// How to sign in while this backend has no login. Listings and the unknown-model
+    /// error use it. Routing ignores it, so a later login needs no restart.
+    fn missing_login_hint(&self) -> Option<&'static str> {
+        None
+    }
+
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response;
 
     async fn handle_messages_with_conversation_identity(

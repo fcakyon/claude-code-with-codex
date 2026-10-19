@@ -51,6 +51,10 @@ fn models_include_listed_codex_cli_cache_entries() -> Result<(), Box<dyn std::er
             {"slug":"gpt-hidden","visibility":"hide","supported_in_api":true},
             {"slug":"gpt-noapi","visibility":"list","supported_in_api":false}]}"#,
     )?;
+    std::fs::write(
+        dir.path().join("auth.json"),
+        r#"{"tokens":{"access_token":"toy","refresh_token":"toy"}}"#,
+    )?;
     let mut cmd = Command::cargo_bin("claude-codex")?;
     cmd.env("CCP_CODEX_AUTH_FILE", dir.path().join("auth.json"));
     cmd.arg("models");

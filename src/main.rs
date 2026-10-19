@@ -325,7 +325,12 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
 
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
+    let signed_out = registry.signed_out();
     for provider in ["codex", "kimi", "grok", "cursor"] {
+        if let Some(hint) = signed_out.get(provider) {
+            println!("{provider}: not signed in, {hint}");
+            continue;
+        }
         let Some(models) = grouped.get(provider) else {
             continue;
         };

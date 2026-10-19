@@ -111,7 +111,8 @@ the model name and routes:
   ChatGPT login from the Codex CLI's `~/.codex/auth.json`. The proxy refreshes
   that token when needed and writes it back so the Codex CLI keeps working.
 
-An unknown model name returns a clear 400 that lists the ids you can use.
+An unknown model name returns a clear 400 that lists the ids you can use and
+names any backend that still needs a login.
 
 ## Configuration
 
@@ -161,9 +162,10 @@ Alias remapping is optional. For example,
 ## Other backends
 
 The same proxy can also route to **Kimi**, **Grok**, and **Cursor** models, each
-with its own login. Run `claude-codex models` to see every id, and
-`claude-codex <backend> auth status` to check a login. These backends keep
-the behavior of the upstream project this is based on.
+with its own login. Run `claude-codex models` to see the ids of every backend
+you are signed into and how to sign in to the rest, and
+`claude-codex <backend> auth status` to check a login. These backends keep the
+behavior of the upstream project this is based on.
 
 ## Limitations
 

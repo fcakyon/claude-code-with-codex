@@ -522,6 +522,15 @@ impl Provider for CodexProvider {
         "codex"
     }
 
+    fn missing_login_hint(&self) -> Option<&'static str> {
+        file_store()
+            .load_auth()
+            .ok()
+            .flatten()
+            .is_none()
+            .then_some("run `codex login`")
+    }
+
     fn supported_models(&self) -> Vec<String> {
         translate::model_allowlist::listed_models()
     }
