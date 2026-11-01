@@ -90,6 +90,29 @@ Release steps live in the `release` skill at `.agents/skills/release/SKILL.md`.
 - Keep tests hermetic: toy credentials and mock upstreams, never the real
   `~/.codex/auth.json` or a live backend.
 
+## Upstream merges
+
+Merge `upstream/main` (raine/claude-code-proxy) in a throwaway worktree. The
+same conflicts recur:
+
+- Keep ours for `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`. Delete upstream's
+  `docs/`, `src/providers/opencode/`, `src/providers/codex/auth/browser_login.rs`,
+  and the OpenCode config and registry tests.
+- Take upstream's `model_allowlist.rs` and `model_catalog.rs`, then keep the
+  fork's alias preference lists (`alias_target`) and `listed_models()`, and keep
+  `catalog_path()` on `codex_auth_file()` with its `cfg!(test)` guard so the
+  catalog and credentials share one Codex home. Upstream's `CODEX_MODELS` and
+  `expand_codex_models` duplicate `listed_models()`, so drop them.
+- Rename `claude_code_proxy` to `claude_codex` in new upstream tests, and add
+  `passthrough: None` to every new `RequestContext` literal.
+- New upstream process tests must write the Codex CLI `auth.json`
+  (`{"tokens":{"access_token":..}}`) where `codex_auth_file()` looks, set
+  `CCP_ALIAS_PROVIDER=codex` to send aliases to Codex, and expect
+  "No Codex credentials" when signed out.
+- Any ingress check that rejects a request shape Codex cannot serve, like the
+  message-thread rejection in `server.rs`, runs after provider selection and
+  skips the `anthropic` provider, so Claude requests stay untouched.
+
 ## Gotchas
 
 - In the dual setup, `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` must be
