@@ -95,13 +95,14 @@ fn apply_auto_review_model(
         return None;
     }
 
-    let override_model =
-        configured_model
-            .filter(|model| !model.is_empty())
-            .or((original_provider == "codex").then(|| {
+    let override_model = configured_model
+        .filter(|model| !model.is_empty())
+        .or_else(|| {
+            (original_provider == "codex").then(|| {
                 crate::providers::codex::translate::model_allowlist::alias_target("haiku")
                     .expect("haiku is a codex alias")
-            }))?;
+            })
+        })?;
     let route = AutoReviewRoute {
         requested_model: body.model.clone()?,
         override_model: override_model.to_string(),
@@ -1691,6 +1692,49 @@ async fn dispatch_request(
         }
     };
 
+    // Only the Anthropic passthrough speaks message threads natively; the
+    // translating backends accept a new thread and reject continuing one.
+    if provider.name() != "anthropic"
+        && let Some(thread) = body.extra.remove("thread")
+        && thread.get("type").and_then(Value::as_str) != Some("create")
+    {
+        let message = "capability_rejected: beta_header:message-threads-2026-08-12";
+        let response = json_error(StatusCode::BAD_REQUEST, "invalid_request_error", message);
+        log_request_completed(
+            &log,
+            RequestLogContext {
+                req_id: &req_id,
+                provider: Some(provider.name()),
+                model: Some(&normalized_model),
+                count_tokens,
+                status: response.status(),
+                started_at,
+            },
+        );
+        let (response, details) = record_failed_response(
+            &log,
+            FailedResponseLogContext {
+                req_id: &req_id,
+                provider: Some(provider.name()),
+                model: Some(&normalized_model),
+                count_tokens,
+                started_at,
+            },
+            response,
+        )
+        .await;
+        monitor_failed(
+            state.monitor.as_ref(),
+            &req_id,
+            Some(response.status()),
+            details
+                .as_ref()
+                .map(|details| details.message.as_str())
+                .unwrap_or(message),
+        );
+        return with_request_id(response, &req_id);
+    }
+
     body.bypass_provider_model_override = auto_review_route.is_some() && provider.name() == "codex";
 
     if let Some(route) = auto_review_route.as_ref() {
@@ -2385,6 +2429,57 @@ mod auto_review_tests {
             .expect("configured classifier should be routed");
         assert_eq!(route.override_model, "grok-4.5");
         assert_eq!(classifier.model.as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
+    fn grok_session_classifier_routes_by_requested_model_or_explicit_override() {
+        use crate::config::AliasProvider;
+        use crate::registry::Registry;
+        use crate::session::{record_session_request, record_session_request_with_affinity_update};
+
+        let registry = Registry::new(AliasProvider::Codex);
+        let session_id = "grok-session-classifier-routing";
+        let initial = record_session_request(Some(session_id), None, "grok", "grok-4.6", 1)
+            .expect("Grok session");
+        assert_eq!(initial.affinity_provider, None);
+
+        for (requested, configured, expected_provider, expected_model) in [
+            ("claude-sonnet-4-6", None, "codex", "gpt-6-luna"),
+            ("grok-4.6", None, "grok", "grok-4.6"),
+            ("claude-sonnet-4-6", Some("grok-4.6"), "grok", "grok-4.6"),
+            ("gpt-6-luna", Some("grok-4.6"), "grok", "grok-4.6"),
+        ] {
+            let mut classifier = request(
+                "You are a security monitor for autonomous AI coding agents.",
+                false,
+                json!([]),
+            );
+            classifier.model = Some(requested.to_string());
+            let original = registry
+                .provider_for_model(requested, initial.affinity_provider.as_ref())
+                .expect("original provider");
+            let route =
+                apply_auto_review_model(&mut classifier, false, configured, original.name());
+            let model = classifier.model.as_deref().expect("classifier model");
+            let provider = if route.is_some() {
+                registry.provider_for_model(model, None).expect("override")
+            } else {
+                original
+            };
+            assert_eq!(provider.name(), expected_provider);
+            assert_eq!(model, expected_model);
+
+            let after_review = record_session_request_with_affinity_update(
+                Some(session_id),
+                Some(&initial),
+                provider.name(),
+                model,
+                route.is_none(),
+                2,
+            )
+            .expect("session after review");
+            assert_eq!(after_review.affinity_provider, None);
+        }
     }
 
     #[test]

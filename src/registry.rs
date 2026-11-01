@@ -47,6 +47,7 @@ pub(crate) const GROK_MODELS: &[&str] =
 
 pub struct Registry {
     alias_provider: AliasProvider,
+    dynamic_codex: bool,
     models: BTreeMap<String, Vec<String>>,
     handlers: BTreeMap<String, Arc<dyn Provider>>,
 }
@@ -92,6 +93,7 @@ impl Registry {
 
         Self {
             alias_provider,
+            dynamic_codex: true,
             models,
             handlers,
         }
@@ -114,6 +116,7 @@ impl Registry {
         }
         Self {
             alias_provider,
+            dynamic_codex: false,
             models,
             handlers,
         }
@@ -130,7 +133,11 @@ impl Registry {
     }
 
     pub fn supported_models_for(&self, provider: &str) -> Vec<String> {
-        let mut models = self.models.get(provider).cloned().unwrap_or_default();
+        let mut models = if self.dynamic_codex && provider == "codex" {
+            crate::providers::codex::translate::model_allowlist::listed_models()
+        } else {
+            self.models.get(provider).cloned().unwrap_or_default()
+        };
         if provider == self.alias_provider.as_str() {
             for alias in ANTHROPIC_STYLE_ALIASES {
                 if !models.iter().any(|value| value == alias) {
@@ -187,16 +194,21 @@ impl Registry {
             return self.handlers.get("cursor").cloned();
         }
 
-        // Exact model-name match reaches a specific backend regardless of the alias
-        // target: this is how `ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra` sends the
-        // sonnet slot to codex even while aliases default to the Anthropic passthrough.
         for (name, models) in &self.models {
-            if name == "anthropic" {
-                continue;
-            }
-            if models.iter().any(|candidate| candidate == &normalized) {
+            if !(self.dynamic_codex && name == "codex")
+                && models.iter().any(|candidate| candidate == &normalized)
+            {
                 return self.handlers.get(name).cloned();
             }
+        }
+
+        // Hidden catalog models are accepted explicitly without being advertised.
+        if self.dynamic_codex
+            && crate::providers::codex::translate::model_allowlist::is_valid_model_for_codex(
+                &normalized,
+            )
+        {
+            return self.handlers.get("codex").cloned();
         }
 
         None
@@ -559,6 +571,8 @@ mod tests {
             "gpt-6-luna",
             "gpt-6.1-sol",
             "gpt-6.1-sol-fast",
+            "gpt-6.1-terra",
+            "gpt-6.1-terra-fast",
         ] {
             assert_eq!(
                 registry.provider_for_model(model, None).unwrap().name(),

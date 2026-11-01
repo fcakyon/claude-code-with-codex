@@ -17,6 +17,9 @@ pub enum CursorStreamEvent {
     TextDelta {
         text: String,
     },
+    /// A native exec request: Cursor asking the client to run Read, Write or a
+    /// shell command. Decoded from ExecServerMessage.
+    Exec(CursorExecRequest),
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -24,6 +27,30 @@ pub enum CursorStreamEvent {
         cache_write_tokens: u64,
     },
     End,
+}
+
+/// A tool the Cursor upstream wants the client to execute.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CursorExecRequest {
+    pub exec_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub kind: CursorExecKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CursorExecKind {
+    Read {
+        path: String,
+    },
+    Write {
+        path: String,
+        content: String,
+    },
+    Shell {
+        command: String,
+        working_directory: Option<String>,
+        timeout_ms: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -279,14 +306,42 @@ fn events_from_current_payload(payload: &[u8], events: &mut Vec<CursorStreamEven
 }
 
 fn events_from_message(msg: &AgentServerMessage, events: &mut Vec<CursorStreamEvent>) {
-    // Check for exec_server_message with session info
-    if let Some(ref exec) = msg.exec_server_message
-        && let Some(ref session_id) = exec.notes_session_id
-        && !session_id.is_empty()
-    {
-        events.push(CursorStreamEvent::Session {
-            session_id: session_id.clone(),
-        });
+    // Native exec request: Cursor asks the client to run the tool itself.
+    if let Some(ref exec) = msg.exec_server_message {
+        let read = exec.read_args.as_ref();
+        let write = exec.write_args.as_ref();
+        let shell = exec.shell_stream_args.as_ref().or(exec.shell_args.as_ref());
+
+        let kind = if let Some(read) = read {
+            Some(CursorExecKind::Read {
+                path: read.path.clone(),
+            })
+        } else if let Some(write) = write {
+            Some(CursorExecKind::Write {
+                path: write.path.clone(),
+                content: write.file_text.clone(),
+            })
+        } else {
+            shell.map(|shell| CursorExecKind::Shell {
+                command: shell.command.clone(),
+                working_directory: shell.working_directory.clone(),
+                timeout_ms: shell
+                    .timeout
+                    .and_then(|timeout| u64::try_from(timeout).ok()),
+            })
+        };
+
+        if let Some(kind) = kind {
+            let tool_call_id = read
+                .and_then(|r| r.tool_call_id.clone())
+                .or_else(|| write.and_then(|w| w.tool_call_id.clone()))
+                .or_else(|| shell.and_then(|s| s.tool_call_id.clone()));
+            events.push(CursorStreamEvent::Exec(CursorExecRequest {
+                exec_id: exec.exec_id.clone(),
+                tool_call_id,
+                kind,
+            }));
+        }
     }
 
     if let Some(ref update) = msg.interaction_update {
@@ -332,9 +387,8 @@ pub fn estimate_request_input_tokens(req: &MessagesRequest) -> u64 {
 mod tests {
     use super::*;
     use crate::providers::cursor::connect::encode_connect_frame;
-    use crate::providers::cursor::proto::*;
+
     use crate::providers::cursor::test_frames;
-    use prost::Message;
 
     #[test]
     fn decodes_text_and_usage_events() {
@@ -366,25 +420,44 @@ mod tests {
         }
     }
 
+    // The frame a Cursor Read tool call actually arrives in, built with the
+    // field numbers measured from the live upstream on 2026-10-12: tag 2 is the
+    // exec server message, tag 7 inside it is read_args, tag 1 of read_args is
+    // the path and tag 2 is Cursor's own tool_call_id.
     #[test]
-    fn decodes_session_event() {
-        let msg = AgentServerMessage {
-            interaction_update: None,
-            exec_server_message: Some(ExecServerMessage {
-                notes_session_id: Some("session-123".to_string()),
-            }),
-        };
-        let mut payload = Vec::new();
-        msg.encode(&mut payload).unwrap();
-        let body = encode_connect_frame(&payload, 0).to_vec();
+    fn decodes_native_read_exec() {
+        let body = test_frames::native_read_exec_frame("/etc/hostname", "tool_abc", "exec-1");
 
         let events = decode_upstream_response(&body).unwrap();
         assert_eq!(events.len(), 1);
-        if let CursorStreamEvent::Session { session_id } = &events[0] {
-            assert_eq!(session_id, "session-123");
-        } else {
-            panic!("expected Session");
+        match &events[0] {
+            CursorStreamEvent::Exec(exec) => {
+                assert_eq!(exec.exec_id.as_deref(), Some("exec-1"));
+                assert_eq!(exec.tool_call_id.as_deref(), Some("tool_abc"));
+                assert_eq!(
+                    exec.kind,
+                    CursorExecKind::Read {
+                        path: "/etc/hostname".to_string()
+                    }
+                );
+            }
+            other => panic!("expected Exec, got {other:?}"),
         }
+    }
+
+    /// A model tool call must never reach Claude Code as the model's prose: the
+    /// shipped mapping read tool_call_started (tag 2) as if it were text_delta.
+    #[test]
+    fn tool_call_started_is_not_text() {
+        let body = test_frames::tool_call_started_frame("call_abc\nfc_123");
+
+        let events = decode_upstream_response(&body).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, CursorStreamEvent::TextDelta { .. })),
+            "tool_call_started leaked into the text channel: {events:?}"
+        );
     }
 
     #[test]

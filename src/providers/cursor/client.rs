@@ -29,6 +29,80 @@ impl CursorUpstreamResponse {
     }
 }
 
+/// How long the reader waits with nothing on the wire before it gives up.
+///
+/// The agent goes quiet for minutes while Claude Code runs the tool it asked
+/// for, so this only has to catch a dead connection.
+const RUN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// One event from a live run.
+pub enum LiveEvent {
+    Message(Box<proto::AgentServerMessage>),
+    End,
+    Error(String),
+}
+
+/// An open `AgentService/Run` stream.
+///
+/// `Run` is bidirectional: the request body stays open for the whole turn and
+/// every `ExecServerMessage` is answered on the same stream. Closing it (the
+/// old code aborted the body after the first pause) makes the agent re-plan
+/// from scratch, which re-issues the tool call it was already waiting on.
+pub struct LiveRun {
+    tx: mpsc::Sender<Result<Bytes, std::io::Error>>,
+    pub events: mpsc::Receiver<LiveEvent>,
+    writer: tokio::task::JoinHandle<()>,
+}
+
+impl LiveRun {
+    /// Write one client message on the open request body.
+    pub async fn send(&self, message: &proto::AgentClientMessage) -> Result<(), CursorError> {
+        self.tx
+            .send(Ok(encode_connect_frame(message.encode_to_vec(), 0)))
+            .await
+            .map_err(|_| CursorError::internal("Cursor run already closed"))
+    }
+}
+
+impl Drop for LiveRun {
+    fn drop(&mut self) {
+        // Without this the heartbeat task holds the body open forever and the
+        // abandoned run keeps a connection (and its tokens) alive upstream.
+        self.writer.abort();
+    }
+}
+
+#[cfg(test)]
+impl LiveRun {
+    /// A run backed by an in-memory channel: registry tests never touch a
+    /// transport.
+    pub(crate) fn for_test(events: mpsc::Receiver<LiveEvent>) -> Self {
+        let (tx, _rx) = mpsc::channel(1);
+        Self {
+            tx,
+            events,
+            writer: tokio::spawn(async {}),
+        }
+    }
+
+    /// A run whose writes land in `tx`, for tests that inspect the frames.
+    pub(crate) fn from_channel_for_test(tx: mpsc::Sender<Result<Bytes, std::io::Error>>) -> Self {
+        let (_event_tx, events) = mpsc::channel(1);
+        Self {
+            tx,
+            events,
+            writer: tokio::spawn(async {}),
+        }
+    }
+}
+
+/// The open HTTP/2 exchange, before either side is turned into events.
+struct RunTransport {
+    response: reqwest::Response,
+    tx: mpsc::Sender<Result<Bytes, std::io::Error>>,
+    writer: tokio::task::JoinHandle<()>,
+}
+
 /// HTTP/2 client for the Cursor AgentService/Run endpoint.
 pub struct CursorHttpClient {
     client: reqwest::Client,
@@ -43,44 +117,178 @@ impl Default for CursorHttpClient {
 
 impl CursorHttpClient {
     pub fn new() -> Self {
-        // Use HTTP/2 prior knowledge for cleartext URLs (mock testing) and
-        // standard TLS for https URLs.
+        // One pooled client per transport kind, shared by every request: a client
+        // built per request opened a fresh TCP + TLS + HTTP/2 connection each
+        // time and never reused one.
+        static TLS: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        static CLEARTEXT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
         let base_url = config::cursor_base_url();
+        // HTTP/2 prior knowledge for cleartext URLs (mock testing), standard
+        // TLS for https URLs.
         let is_cleartext = base_url.starts_with("http://");
-
-        let mut builder = reqwest::Client::builder()
-            .http2_keep_alive_timeout(std::time::Duration::from_secs(30))
-            .http2_keep_alive_while_idle(true);
-
-        if is_cleartext {
-            builder = builder.http2_prior_knowledge();
-        }
-
-        let client = builder.build().expect("CursorHttpClient: reqwest client");
+        let slot = if is_cleartext { &CLEARTEXT } else { &TLS };
+        let client = slot
+            .get_or_init(|| {
+                let mut builder = reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .tcp_keepalive(std::time::Duration::from_secs(30))
+                    // hyper only sends HTTP/2 pings when an interval is set;
+                    // the timeout and while_idle knobs alone are inert.
+                    .http2_keep_alive_interval(std::time::Duration::from_secs(20))
+                    .http2_keep_alive_timeout(std::time::Duration::from_secs(30))
+                    .http2_keep_alive_while_idle(true);
+                if is_cleartext {
+                    builder = builder.http2_prior_knowledge();
+                }
+                builder.build().expect("CursorHttpClient: reqwest client")
+            })
+            .clone();
 
         Self { client, base_url }
     }
 
-    /// Run the Cursor agent with the given prompt and token.
+    /// Open a live `AgentService/Run` and keep it open.
     ///
-    /// Opens a bidirectional Connect stream, sends the agent request frames,
-    /// and keeps the request body alive while collecting the response frames.
-    pub async fn run_agent(
+    /// The returned handle owns the write side of the request body, so the
+    /// caller can answer exec requests on the same stream, and a reader task
+    /// that decodes response frames incrementally into `LiveRun::events`.
+    pub async fn start_run(
         &self,
         token: &str,
         prompt: &str,
         model: &str,
         images: &[CursorSelectedImage],
-    ) -> Result<CursorUpstreamResponse, CursorError> {
+    ) -> Result<LiveRun, CursorError> {
+        let transport = self.open_run(token, prompt, model, images).await?;
+        let status = transport.response.status().as_u16();
+        let headers = transport.response.headers().clone();
+
+        if status >= 400 {
+            let error_detail = headers
+                .get("grpc-message")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let mut stream = transport.response.bytes_stream();
+            let mut body = Vec::new();
+            while let Some(Ok(chunk)) = stream.next().await {
+                body.extend_from_slice(&chunk);
+            }
+            transport.writer.abort();
+            let detail = parse_error_body(&body, &headers).or(error_detail);
+            return Err(CursorError::new(status, "Cursor upstream error", detail));
+        }
+
+        let (event_tx, event_rx) = mpsc::channel::<LiveEvent>(64);
+        let kv_tx = transport.tx.clone();
+        tokio::spawn(async move {
+            let mut stream = transport.response.bytes_stream();
+            let mut decoder = ConnectFrameDecoder::new();
+            let mut blobs: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                std::collections::HashMap::new();
+            loop {
+                let next = tokio::time::timeout(RUN_IDLE_TIMEOUT, stream.next()).await;
+                let chunk = match next {
+                    Ok(Some(Ok(chunk))) => chunk,
+                    Ok(Some(Err(error))) => {
+                        let _ = event_tx
+                            .send(LiveEvent::Error(format!("read body: {error}")))
+                            .await;
+                        return;
+                    }
+                    Ok(None) => {
+                        let _ = event_tx.send(LiveEvent::End).await;
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = event_tx
+                            .send(LiveEvent::Error(
+                                "Cursor upstream went quiet with the run open".to_string(),
+                            ))
+                            .await;
+                        return;
+                    }
+                };
+
+                let frames = match decoder.push(&chunk) {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        let _ = event_tx
+                            .send(LiveEvent::Error(format!("frame decode: {error}")))
+                            .await;
+                        return;
+                    }
+                };
+
+                for frame in frames {
+                    if frame.flags & FLAG_END != 0 {
+                        // The upstream closed the turn: a payload carries a
+                        // Connect error, an empty one is a clean end.
+                        let event = match parse_connect_error(&frame.payload) {
+                            Some(error) => LiveEvent::Error(error.to_string()),
+                            None => LiveEvent::End,
+                        };
+                        let _ = event_tx.send(event).await;
+                        return;
+                    }
+                    match decode_frame_payload(&frame) {
+                        Ok(message) => {
+                            // The agent store is answered here rather than by
+                            // the pump: a blob the server is waiting on must
+                            // land even while the turn is paused on a tool.
+                            if let Some(kv) = message.kv_server_message.as_ref()
+                                && let Some(reply) = kv_reply(kv, &mut blobs)
+                            {
+                                if kv_tx
+                                    .send(Ok(encode_connect_frame(reply.encode_to_vec(), 0)))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
+                            }
+                            if event_tx
+                                .send(LiveEvent::Message(Box::new(message)))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        // Keep reading: one frame the bridge cannot name must
+                        // not end a turn that is still running.
+                        Err(_) => continue,
+                    }
+                }
+            }
+        });
+
+        Ok(LiveRun {
+            tx: transport.tx,
+            events: event_rx,
+            writer: transport.writer,
+        })
+    }
+
+    /// Send the run request frames and keep the body open with heartbeats.
+    async fn open_run(
+        &self,
+        token: &str,
+        prompt: &str,
+        model: &str,
+        images: &[CursorSelectedImage],
+    ) -> Result<RunTransport, CursorError> {
         let resolved = super::model::resolve_cursor_model(model)
             .map_err(|e| CursorError::internal(format!("model resolution: {e}")))?;
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let frames = build_run_frames(prompt, &resolved, images, &request_id);
         let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
-        let sender = tokio::spawn(async move {
+        let writer_tx = tx.clone();
+        let writer = tokio::spawn(async move {
             for (index, frame) in frames.into_iter().enumerate() {
-                if tx.send(Ok(frame)).await.is_err() {
+                if writer_tx.send(Ok(frame)).await.is_err() {
                     return;
                 }
                 let delay = match index {
@@ -95,7 +303,7 @@ impl CursorHttpClient {
             heartbeat.tick().await;
             loop {
                 heartbeat.tick().await;
-                if tx.send(Ok(heartbeat_frame())).await.is_err() {
+                if writer_tx.send(Ok(heartbeat_frame())).await.is_err() {
                     return;
                 }
             }
@@ -131,20 +339,45 @@ impl CursorHttpClient {
             .await
             .map_err(CursorError::from_reqwest)?;
 
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let error_detail = response
-            .headers()
+        Ok(RunTransport {
+            response,
+            tx,
+            writer,
+        })
+    }
+
+    /// Run the Cursor agent to the end of its turn and return the raw body.
+    ///
+    /// Used where the caller needs the untouched frame bytes (traffic capture,
+    /// non-streaming replies). Tool rounds need [`Self::start_run`] instead.
+    pub async fn run_agent(
+        &self,
+        token: &str,
+        prompt: &str,
+        model: &str,
+        images: &[CursorSelectedImage],
+    ) -> Result<CursorUpstreamResponse, CursorError> {
+        let transport = self.open_run(token, prompt, model, images).await?;
+        let sender = transport.writer;
+        let status = transport.response.status().as_u16();
+        let headers = transport.response.headers().clone();
+        let error_detail = headers
             .get("grpc-message")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let mut stream = response.bytes_stream();
+        let mut stream = transport.response.bytes_stream();
         let mut body_bytes = Vec::new();
         let mut received_data = false;
 
         loop {
+            // The upstream stays silent while the model thinks — measured
+            // 12/10/2026: a large prompt sent its checkpoint frames, went quiet
+            // for more than five seconds, and the old 5s idle cut returned a
+            // partial body with no model text (Claude Code showed an empty
+            // reply). The stream ends with an explicit END frame, so the idle
+            // timeout only guards a truly dead connection.
             let timeout = if received_data {
-                std::time::Duration::from_secs(5)
+                std::time::Duration::from_secs(8)
             } else {
                 std::time::Duration::from_secs(60)
             };
@@ -212,11 +445,26 @@ fn field_varint(field: u64, value: u64) -> Vec<u8> {
     out
 }
 
-fn model_message(model: &str, fast: bool) -> Vec<u8> {
-    let mut out = field_string(1, model);
-    let mut parameter = field_string(1, "fast");
-    parameter.extend(field_string(2, if fast { "true" } else { "false" }));
-    out.extend(field_bytes(3, &parameter));
+fn model_parameter(id: &str, value: &str) -> Vec<u8> {
+    let mut parameter = field_string(1, id);
+    parameter.extend(field_string(2, value));
+    parameter
+}
+
+fn model_message(resolved: &CursorModelResolution) -> Vec<u8> {
+    let mut out = field_string(1, &resolved.model_id);
+    // Grok 4.7 exposes its 500k window through max mode.
+    if resolved.model_id == "grok-4.7" {
+        out.extend(field_varint(2, 1));
+        out.extend(field_bytes(3, &model_parameter("context", "500k")));
+    }
+    for (id, value) in &resolved.parameters {
+        out.extend(field_bytes(3, &model_parameter(id, value)));
+    }
+    if resolved.send_fast {
+        let value = if resolved.fast { "true" } else { "false" };
+        out.extend(field_bytes(3, &model_parameter("fast", value)));
+    }
     out
 }
 
@@ -268,37 +516,14 @@ fn build_run_frames(
     request.extend(field_bytes(2, &action));
     request.extend(field_bytes(4, &[]));
     request.extend(field_string(5, &conversation_id));
-    request.extend(field_bytes(
-        9,
-        &model_message(&resolved.model_id, resolved.fast),
-    ));
+    request.extend(field_bytes(9, &model_message(resolved)));
     request.extend(field_varint(12, 0));
     request.extend(field_bytes(14, &field_string(1, "default")));
-    request.extend(field_bytes(
-        14,
-        &model_message(&resolved.model_id, resolved.fast),
-    ));
+    request.extend(field_bytes(14, &model_message(resolved)));
     request.extend(field_string(16, &conversation_id));
     let first = encode_connect_frame(field_bytes(1, &request), 0);
 
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|path| path.to_str().map(str::to_string))
-        .unwrap_or_default();
-    let mut environment = field_string(1, std::env::consts::OS);
-    environment.extend(field_string(2, &cwd));
-    environment.extend(field_string(
-        3,
-        if cfg!(windows) { "powershell" } else { "bash" },
-    ));
-    environment.extend(field_string(10, "UTC"));
-    environment.extend(field_string(11, &cwd));
-    environment.extend(field_varint(14, 1));
-    environment.extend(field_varint(16, 1));
-    environment.extend(field_varint(19, 0));
-    environment.extend(field_varint(20, 0));
-    environment.extend(field_string(21, &cwd));
-    environment.extend(field_varint(22, 0));
+    let environment = request_context_env().encode_to_vec();
     let context = field_bytes(
         2,
         &field_bytes(
@@ -322,6 +547,57 @@ fn build_run_frames(
         frames.push(encode_connect_frame(field_bytes(3, &marker), 0));
     }
     frames
+}
+
+/// Answer one agent-store message, keeping the blobs the run was handed.
+///
+/// The server writes its conversation state here and reads it back on resume;
+/// an unanswered message leaves it waiting on its own checkpoint.
+fn kv_reply(
+    message: &proto::KvServerMessage,
+    blobs: &mut std::collections::HashMap<Vec<u8>, Vec<u8>>,
+) -> Option<proto::AgentClientMessage> {
+    let reply = match message.message.as_ref()? {
+        proto::kv_server_message::Message::SetBlobArgs(args) => {
+            blobs.insert(args.blob_id.clone(), args.blob_data.clone());
+            proto::kv_client_message::Message::SetBlobResult(proto::SetBlobResult {})
+        }
+        proto::kv_server_message::Message::GetBlobArgs(args) => {
+            proto::kv_client_message::Message::GetBlobResult(proto::GetBlobResult {
+                blob_data: Some(blobs.get(&args.blob_id).cloned().unwrap_or_default()),
+            })
+        }
+    };
+    Some(proto::AgentClientMessage {
+        kv_client_message: Some(proto::KvClientMessage {
+            id: message.id,
+            message: Some(reply),
+        }),
+        ..Default::default()
+    })
+}
+
+/// The environment the agent is told it runs in.
+///
+/// Sent preemptively in the run preamble and again as the answer to
+/// `request_context_args`: the server needs a populated context in that answer,
+/// and an empty one fails the run with "Failed to get request context
+/// (internal)".
+pub fn request_context_env() -> proto::RequestContextEnv {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_string))
+        .unwrap_or_default();
+    proto::RequestContextEnv {
+        os_version: std::env::consts::OS.to_string(),
+        workspace_paths: vec![cwd.clone()],
+        shell: if cfg!(windows) { "powershell" } else { "bash" }.to_string(),
+        time_zone: "UTC".to_string(),
+        project_folder: cwd.clone(),
+        sandbox_supported: Some(true),
+        sandbox_network_has_defaults: Some(true),
+        process_working_directory: Some(cwd),
+    }
 }
 
 fn heartbeat_frame() -> Bytes {
@@ -450,3 +726,55 @@ impl std::fmt::Display for CursorError {
 }
 
 impl std::error::Error for CursorError {}
+
+#[cfg(test)]
+mod model_message_tests {
+    use super::*;
+
+    #[test]
+    fn grok_4_7_requests_max_mode_500k() {
+        let msg = model_message(&wire("grok-4.7"));
+        let text = String::from_utf8_lossy(&msg);
+        assert!(text.contains("grok-4.7"));
+        assert!(text.contains("context"));
+        assert!(text.contains("500k"));
+        assert!(text.contains("fast"));
+        assert!(text.contains("false"));
+        assert!(msg.windows(2).any(|pair| pair == [0x10, 0x01]));
+    }
+
+    #[test]
+    fn other_models_do_not_request_max_mode() {
+        let msg = model_message(&wire("composer-2.5-fast"));
+        let text = String::from_utf8_lossy(&msg);
+        assert!(text.contains("composer-2.5"));
+        assert!(text.contains("true"));
+        assert!(!text.contains("500k"));
+        assert!(!msg.windows(2).any(|pair| pair == [0x10, 0x01]));
+    }
+
+    fn wire(model: &str) -> CursorModelResolution {
+        crate::providers::cursor::model::resolve_cursor_model(&format!("cursor:{model}")).unwrap()
+    }
+
+    #[test]
+    fn sonnet_5_5_medium_omits_fast() {
+        let msg = model_message(&wire("claude-sonnet-5-5-medium"));
+        let text = String::from_utf8_lossy(&msg);
+        assert!(text.contains("claude-sonnet-5-5"));
+        assert!(text.contains("reasoning_effort"));
+        assert!(text.contains("medium"));
+        assert!(text.contains("300k"));
+        assert!(!text.contains("fast"));
+    }
+
+    #[test]
+    fn composer_fast_still_sends_fast() {
+        let msg = model_message(&wire("composer-2.5-fast"));
+        let text = String::from_utf8_lossy(&msg);
+        assert!(text.contains("composer-2.5"));
+        assert!(text.contains("fast"));
+        assert!(text.contains("true"));
+        assert!(!text.contains("300k"));
+    }
+}

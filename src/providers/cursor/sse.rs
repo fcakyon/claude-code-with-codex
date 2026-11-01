@@ -32,8 +32,7 @@ pub fn frame_cursor_stream(
         }
     };
 
-    let mut sse = Vec::new();
-    let mut framer = CursorSseFramer::new(&mut sse, message_id, model);
+    let mut framer = CursorSseFramer::new(message_id, model);
 
     for event in &events {
         match event {
@@ -42,6 +41,11 @@ pub fn frame_cursor_stream(
             }
             CursorStreamEvent::TextDelta { text } => {
                 framer.emit_text_delta(text);
+            }
+            CursorStreamEvent::Exec(_) => {
+                // Without an advertised Claude tool and a session id the proxy
+                // cannot hand this exec to the client, and the upstream never
+                // emitted it as text. Dropping it is the honest outcome.
             }
             CursorStreamEvent::Usage {
                 input_tokens,
@@ -66,11 +70,11 @@ pub fn frame_cursor_stream(
     }
 
     framer.finalize();
-    sse
+    framer.take_output()
 }
 
 /// Format an SSE error event.
-fn format_sse_error(error: &str) -> Vec<u8> {
+pub(crate) fn format_sse_error(error: &str) -> Vec<u8> {
     let data = serde_json::json!({
         "type": "error",
         "error": {
@@ -92,8 +96,12 @@ pub(crate) fn format_sse_event_bytes(event: &str, data: &serde_json::Value) -> V
 // ---------------------------------------------------------------------------
 
 /// SSE framer that tracks state to produce well-formed Anthropic SSE events.
+///
+/// The framer owns its output so a live pump can drain it between events: the
+/// framer outlives each event, and a `&mut Vec` output would block the handle
+/// that has to hand the bytes to the client right away.
 pub struct CursorSseFramer<'a> {
-    output: &'a mut Vec<u8>,
+    output: Vec<u8>,
     message_id: &'a str,
     model: &'a str,
     started: bool,
@@ -104,13 +112,18 @@ pub struct CursorSseFramer<'a> {
     text_index: i32,
     usage_input_tokens: u64,
     usage_output_tokens: u64,
+    /// Lower bound for the reported input tokens. Cursor's `turn_ended` can be
+    /// absent, which used to report 1 token and hide a full context.
+    input_floor: u64,
+    /// Context size of the latest model step (checkpoint `used_tokens`).
+    context_tokens: u64,
     finalized: bool,
 }
 
 impl<'a> CursorSseFramer<'a> {
-    pub fn new(output: &'a mut Vec<u8>, message_id: &'a str, model: &'a str) -> Self {
+    pub fn new(message_id: &'a str, model: &'a str) -> Self {
         Self {
-            output,
+            output: Vec::new(),
             message_id,
             model,
             started: false,
@@ -121,8 +134,16 @@ impl<'a> CursorSseFramer<'a> {
             text_index: -1,
             usage_input_tokens: 0,
             usage_output_tokens: 0,
+            input_floor: 0,
+            context_tokens: 0,
             finalized: false,
         }
+    }
+
+    /// Take the bytes emitted so far, leaving the framer ready for the next
+    /// event. State (open blocks, indices, usage) survives the drain.
+    pub fn take_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.output)
     }
 
     pub fn ensure_start(&mut self) {
@@ -142,7 +163,7 @@ impl<'a> CursorSseFramer<'a> {
                 "stop_reason": null,
                 "stop_sequence": null,
                 "usage": {
-                    "input_tokens": self.usage_input_tokens.max(1),
+                    "input_tokens": self.reported_input_tokens(),
                     "output_tokens": 0,
                     "cache_creation_input_tokens": 0,
                     "cache_read_input_tokens": 0
@@ -255,6 +276,30 @@ impl<'a> CursorSseFramer<'a> {
             .extend_from_slice(&format_sse_event_bytes(EVENT_CONTENT_BLOCK_DELTA, &data));
     }
 
+    pub fn set_input_floor(&mut self, tokens: u64) {
+        self.input_floor = tokens;
+    }
+
+    pub fn set_context_tokens(&mut self, tokens: u64) {
+        self.context_tokens = tokens;
+    }
+
+    /// The input-token figure Claude Code shows as context. `turn_ended` sums
+    /// every internal model step of a run, so a run with tool calls reported a
+    /// multiple of the real context (measured 13/10: 240k for a 27k context).
+    /// Order: the checkpoint's own counter, then the request-size estimate,
+    /// and only then Cursor's summed figure.
+    fn reported_input_tokens(&self) -> u64 {
+        let tokens = if self.context_tokens > 0 {
+            self.context_tokens
+        } else if self.input_floor > 0 {
+            self.input_floor
+        } else {
+            self.usage_input_tokens
+        };
+        tokens.max(1)
+    }
+
     pub fn record_usage(
         &mut self,
         input_tokens: u64,
@@ -328,7 +373,7 @@ impl<'a> CursorSseFramer<'a> {
                 "stop_sequence": null
             },
             "usage": {
-                "input_tokens": self.usage_input_tokens.max(1),
+                "input_tokens": self.reported_input_tokens(),
                 "output_tokens": self.usage_output_tokens,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0
@@ -533,5 +578,24 @@ mod tests {
         }
 
         events
+    }
+
+    #[test]
+    fn reported_input_follows_the_checkpoint_not_the_summed_turn_usage() {
+        let sse = |floor: u64, context: u64, summed: u64| {
+            let mut framer = CursorSseFramer::new("msg_1", "cursor-test");
+            framer.set_input_floor(floor);
+            framer.set_context_tokens(context);
+            framer.record_usage(summed, 5, 0, 0);
+            framer.ensure_start();
+            framer.finalize();
+            String::from_utf8(framer.take_output()).unwrap()
+        };
+        // Checkpoint known: it wins over both the estimate and the sum.
+        assert!(sse(40_000, 55_000, 240_000).contains("\"input_tokens\":55000"));
+        // No checkpoint: the request-size estimate, never the summed figure.
+        assert!(sse(40_000, 0, 240_000).contains("\"input_tokens\":40000"));
+        // Nothing else known: Cursor's figure, as before.
+        assert!(sse(0, 0, 240_000).contains("\"input_tokens\":240000"));
     }
 }

@@ -13,7 +13,9 @@ pub mod tool_use_xml;
 
 use async_trait::async_trait;
 use axum::Json;
+use axum::body::Body;
 use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
 use http::StatusCode;
 
 use crate::anthropic::error::json_error;
@@ -30,12 +32,10 @@ use crate::providers::cursor::auth::{
 use crate::providers::cursor::client::CursorHttpClient;
 use crate::providers::cursor::model::resolve_cursor_model;
 use crate::providers::cursor::request::render_cursor_prompt;
-use crate::providers::cursor::response::{
-    CursorDecodeError, decode_cursor_upstream, decode_upstream_response,
-};
+use crate::providers::cursor::response::{CursorDecodeError, decode_cursor_upstream};
 use crate::providers::cursor::tool_bridge::{
-    BridgeRegistry, advertised_tool_names, can_bridge_cursor_native_tools, find_tool_result,
-    resume_cursor_tool_bridge, start_cursor_tool_bridge,
+    BridgeRegistry, LiveBridge, PumpOutcome, advertised_tool_names, can_bridge_cursor_native_tools,
+    exec_result_messages, find_tool_result, pump_live_bridge,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,28 +92,25 @@ impl Provider for CursorProvider {
             );
         }
 
-        if let Some(ref session_id) = ctx.session_id
-            && let Some(pending) = BridgeRegistry::pending_tool(session_id)
-            && let Some(result) = find_tool_result(&body, pending.tool_use_id())
+        BridgeRegistry::sweep_abandoned();
+
+        // A live run for this session is waiting on a tool result. Answer it on
+        // the open stream and keep pumping the same run: a new run here would
+        // make the agent re-plan and re-issue the call it already made.
+        if want_stream
+            && let Some(session_id) = live_session_id(&ctx)
+            && let Some(bridge) = BridgeRegistry::take(&session_id)
         {
-            let (_result_messages, sse_bytes) =
-                resume_cursor_tool_bridge(session_id, &message_id, model, result, &pending);
-            if let Some(monitor) = ctx.monitor.as_ref() {
-                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
-                monitor.stream_progress(
-                    &ctx.req_id,
-                    sse_bytes.len() as u64,
-                    count_sse_events(&sse_bytes),
-                    input_tokens,
-                    output_tokens,
-                );
+            match resume_payload(&bridge, &body) {
+                Some(preamble) => {
+                    let mut bridge = bridge;
+                    bridge.input_floor = response::estimate_request_input_tokens(&body);
+                    return live_sse_response(bridge, preamble, &message_id, model, &ctx);
+                }
+                // No result for the pending exec: the caller moved on. The
+                // entry is already gone; this request starts its own run.
+                None => drop(bridge),
             }
-            let headers = [
-                (http::header::CONTENT_TYPE, "text/event-stream"),
-                (http::header::CACHE_CONTROL, "no-cache"),
-                (http::header::CONNECTION, "keep-alive"),
-            ];
-            return (headers, sse_bytes).into_response();
         }
 
         let auth = match load_cursor_auth() {
@@ -151,6 +148,24 @@ impl Provider for CursorProvider {
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.upstream_started(&ctx.req_id);
         }
+
+        // With tools in play the run has to stay open across requests, so it is
+        // opened as a live stream instead of being collected into a body.
+        if want_stream
+            && let Some(session_id) = live_session_id(&ctx)
+            && can_bridge_cursor_native_tools(&body, Some(&session_id))
+        {
+            let allowed = advertised_tool_names(&body);
+            return match client.start_run(&token, &prompt, model, &images).await {
+                Ok(run) => {
+                    let mut bridge = LiveBridge::new(session_id, run, allowed);
+                    bridge.input_floor = (prompt.len() / 4).max(1) as u64;
+                    live_sse_response(bridge, Vec::new(), &message_id, model, &ctx)
+                }
+                Err(error) => map_cursor_error_to_response(&error),
+            };
+        }
+
         let upstream = match client.run_agent(&token, &prompt, model, &images).await {
             Ok(r) => r,
             Err(e) => {
@@ -159,60 +174,23 @@ impl Provider for CursorProvider {
         };
 
         if want_stream {
-            let session_id = ctx.session_id.as_deref();
-            let bridge_eligible = can_bridge_cursor_native_tools(&body, session_id);
-
-            if bridge_eligible {
-                let events = match decode_upstream_response(&upstream.body) {
-                    Ok(e) => e,
-                    Err(e) => return map_cursor_decode_error_to_response(&e),
-                };
-
-                let allowed = advertised_tool_names(&body);
-                let (sse_bytes, _paused) = start_cursor_tool_bridge(
-                    &message_id,
-                    model,
-                    session_id.unwrap(),
-                    &events,
-                    allowed,
-                    Box::new(|| uuid::Uuid::new_v4().to_string().replace('-', "")),
+            let sse_bytes = sse::frame_cursor_stream(&upstream, &message_id, model);
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
+                monitor.stream_progress(
+                    &ctx.req_id,
+                    sse_bytes.len() as u64,
+                    count_sse_events(&sse_bytes),
+                    input_tokens,
+                    output_tokens,
                 );
-                if let Some(monitor) = ctx.monitor.as_ref() {
-                    let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
-                    monitor.stream_progress(
-                        &ctx.req_id,
-                        sse_bytes.len() as u64,
-                        count_sse_events(&sse_bytes),
-                        input_tokens,
-                        output_tokens,
-                    );
-                }
-
-                let headers = [
-                    (http::header::CONTENT_TYPE, "text/event-stream"),
-                    (http::header::CACHE_CONTROL, "no-cache"),
-                    (http::header::CONNECTION, "keep-alive"),
-                ];
-                (headers, sse_bytes).into_response()
-            } else {
-                let sse_bytes = sse::frame_cursor_stream(&upstream, &message_id, model);
-                if let Some(monitor) = ctx.monitor.as_ref() {
-                    let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse_bytes);
-                    monitor.stream_progress(
-                        &ctx.req_id,
-                        sse_bytes.len() as u64,
-                        count_sse_events(&sse_bytes),
-                        input_tokens,
-                        output_tokens,
-                    );
-                }
-                let headers = [
-                    (http::header::CONTENT_TYPE, "text/event-stream"),
-                    (http::header::CACHE_CONTROL, "no-cache"),
-                    (http::header::CONNECTION, "keep-alive"),
-                ];
-                (headers, sse_bytes).into_response()
             }
+            let headers = [
+                (http::header::CONTENT_TYPE, "text/event-stream"),
+                (http::header::CACHE_CONTROL, "no-cache"),
+                (http::header::CONNECTION, "keep-alive"),
+            ];
+            (headers, sse_bytes).into_response()
         } else {
             match decode_cursor_upstream(&upstream, &message_id, model) {
                 Ok(json) => {
@@ -264,17 +242,24 @@ impl Provider for CursorProvider {
             monitor.model_resolved(&ctx.req_id, &resolved.model_id);
         }
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
-        if let Some(session_id) = ctx.session_id.as_deref()
-            && let Some(pending) = BridgeRegistry::pending_tool(session_id)
-            && let Some(result) = find_tool_result(&body, pending.tool_use_id())
+
+        // This surface answers one request at a time, so a parked run is either
+        // resumed here or dropped; the bytes are collected instead of streamed.
+        if let Some(session_id) = live_session_id(&ctx)
+            && let Some(mut bridge) = BridgeRegistry::take(&session_id)
         {
-            let (_, bytes) =
-                resume_cursor_tool_bridge(session_id, &message_id, &requested, result, &pending);
-            return Ok(Generation {
-                body: GenerationBody::BufferedSse(bytes.into()),
-                resolved_model: resolved.model_id,
-            });
+            if let Some(preamble) = resume_payload(&bridge, &body) {
+                let (bytes, outcome) =
+                    pump_buffered(&mut bridge, preamble, &message_id, &requested).await;
+                finish_buffered_run(bridge, outcome);
+                return Ok(Generation {
+                    body: GenerationBody::BufferedSse(bytes.into()),
+                    resolved_model: resolved.model_id,
+                });
+            }
+            drop(bridge);
         }
+
         let auth = load_cursor_auth()
             .map_err(|error| {
                 ProviderError::new(
@@ -312,29 +297,49 @@ impl Provider for CursorProvider {
         if let Some(monitor) = ctx.monitor.as_ref() {
             monitor.upstream_started(&ctx.req_id);
         }
-        let upstream = CursorHttpClient::new()
+        let client = CursorHttpClient::new();
+
+        // Tools in play: the run has to stay open across requests, so it is
+        // pumped as a live stream and its bytes are collected here.
+        if let Some(session_id) = live_session_id(&ctx)
+            && can_bridge_cursor_native_tools(&body, Some(&session_id))
+        {
+            let allowed = advertised_tool_names(&body);
+            let run = client
+                .start_run(&auth.access_token, &prompt, &requested, &images)
+                .await
+                .map_err(cursor_provider_error)?;
+            let mut bridge = LiveBridge::new(session_id, run, allowed);
+            let (bytes, outcome) =
+                pump_buffered(&mut bridge, Vec::new(), &message_id, &requested).await;
+            finish_buffered_run(bridge, outcome);
+            if let Some(traffic) = ctx.traffic.as_ref() {
+                traffic.write_bytes("050-anthropic-intermediate.sse", &bytes);
+            }
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                let (input_tokens, output_tokens) = usage_from_anthropic_sse(&bytes);
+                monitor.stream_progress(
+                    &ctx.req_id,
+                    bytes.len() as u64,
+                    count_sse_events(&bytes),
+                    input_tokens,
+                    output_tokens,
+                );
+            }
+            return Ok(Generation {
+                body: GenerationBody::BufferedSse(bytes.into()),
+                resolved_model: resolved.model_id,
+            });
+        }
+
+        let upstream = client
             .run_agent(&auth.access_token, &prompt, &requested, &images)
             .await
             .map_err(cursor_provider_error)?;
         if let Some(traffic) = ctx.traffic.as_ref() {
             traffic.write_bytes("032-upstream-response-body.bin", &upstream.body);
         }
-        let bytes = if can_bridge_cursor_native_tools(&body, ctx.session_id.as_deref()) {
-            let events =
-                decode_upstream_response(&upstream.body).map_err(cursor_decode_provider_error)?;
-            let allowed = advertised_tool_names(&body);
-            start_cursor_tool_bridge(
-                &message_id,
-                &requested,
-                ctx.session_id.as_deref().expect("bridge session validated"),
-                &events,
-                allowed,
-                Box::new(|| uuid::Uuid::new_v4().simple().to_string()),
-            )
-            .0
-        } else {
-            sse::frame_cursor_stream(&upstream, &message_id, &requested)
-        };
+        let bytes = sse::frame_cursor_stream(&upstream, &message_id, &requested);
         if let Some(traffic) = ctx.traffic.as_ref() {
             traffic.write_bytes("050-anthropic-intermediate.sse", &bytes);
         }
@@ -353,6 +358,135 @@ impl Provider for CursorProvider {
             resolved_model: resolved.model_id,
         })
     }
+}
+
+/// The session id this request can carry a live run on.
+fn live_session_id(ctx: &RequestContext) -> Option<String> {
+    ctx.session_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// The messages that resume a parked run, when this request carries the
+/// `tool_result` for the exec it was waiting on.
+fn resume_payload(
+    bridge: &LiveBridge,
+    body: &MessagesRequest,
+) -> Option<Vec<proto::AgentClientMessage>> {
+    let pending = bridge.pending.as_ref()?;
+    let result = find_tool_result(body, &pending.tool_use_id)?;
+    Some(exec_result_messages(pending, result))
+}
+
+/// Stream the run's SSE to the client as it is produced.
+///
+/// The pump runs in its own task and hands the run back to the registry when it
+/// pauses, before the response body ends -- Claude Code answers a pause with the
+/// next request, and that request has to find the run.
+fn live_sse_response(
+    mut bridge: LiveBridge,
+    preamble: Vec<proto::AgentClientMessage>,
+    message_id: &str,
+    model: &str,
+    ctx: &RequestContext,
+) -> Response {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+    let message_id = message_id.to_string();
+    let model = model.to_string();
+    let monitor = ctx.monitor.clone();
+    let req_id = ctx.req_id.clone();
+
+    tokio::spawn(async move {
+        let mut sse = Vec::new();
+        let mut send_failed = false;
+        for message in preamble {
+            if bridge.run.send(&message).await.is_err() {
+                send_failed = true;
+                break;
+            }
+        }
+
+        let outcome = match send_failed {
+            true => PumpOutcome::Failed("Cursor run already closed".to_string()),
+            false => {
+                pump_live_bridge(&mut bridge, &message_id, &model, &mut |chunk| {
+                    sse.extend_from_slice(chunk);
+                    let _ = tx.send(Bytes::copy_from_slice(chunk));
+                })
+                .await
+            }
+        };
+
+        match outcome {
+            PumpOutcome::Tool(pending) => {
+                bridge.pending = Some(pending);
+                BridgeRegistry::insert(bridge);
+            }
+            // Nothing left to resume: the run is dropped, which closes its
+            // stream upstream.
+            PumpOutcome::Replay | PumpOutcome::Ended | PumpOutcome::Failed(_) => drop(bridge),
+        }
+
+        if let Some(monitor) = monitor {
+            let (input_tokens, output_tokens) = usage_from_anthropic_sse(&sse);
+            monitor.stream_progress(
+                &req_id,
+                sse.len() as u64,
+                count_sse_events(&sse),
+                input_tokens,
+                output_tokens,
+            );
+        }
+        drop(tx);
+    });
+
+    let body = Body::from_stream(futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|chunk| (Ok::<Bytes, std::io::Error>(chunk), rx))
+    }));
+    let headers = [
+        (http::header::CONTENT_TYPE, "text/event-stream"),
+        (http::header::CACHE_CONTROL, "no-cache"),
+        (http::header::CONNECTION, "keep-alive"),
+    ];
+    (headers, body).into_response()
+}
+
+/// Keep or drop a run the buffered pump stopped on.
+fn finish_buffered_run(bridge: LiveBridge, outcome: PumpOutcome) {
+    match outcome {
+        PumpOutcome::Tool(pending) => {
+            let mut bridge = bridge;
+            bridge.pending = Some(pending);
+            BridgeRegistry::insert(bridge);
+        }
+        PumpOutcome::Replay | PumpOutcome::Ended | PumpOutcome::Failed(_) => drop(bridge),
+    }
+}
+
+/// Pump a run to its first stop, collecting the SSE (no live client).
+async fn pump_buffered(
+    bridge: &mut LiveBridge,
+    preamble: Vec<proto::AgentClientMessage>,
+    message_id: &str,
+    model: &str,
+) -> (Vec<u8>, PumpOutcome) {
+    let mut sse = Vec::new();
+    for message in preamble {
+        if bridge.run.send(&message).await.is_err() {
+            return (
+                sse,
+                PumpOutcome::Failed("Cursor run already closed".to_string()),
+            );
+        }
+    }
+    let outcome = pump_live_bridge(bridge, message_id, model, &mut |chunk| {
+        sse.extend_from_slice(chunk)
+    })
+    .await;
+    (sse, outcome)
 }
 
 fn count_sse_events(bytes: &[u8]) -> u64 {
@@ -381,15 +515,6 @@ fn cursor_provider_error(err: client::CursorError) -> ProviderError {
         error.retry_after = Some(err.retry_after.unwrap_or_else(|| "5".to_string()));
     }
     error
-}
-
-fn cursor_decode_provider_error(err: CursorDecodeError) -> ProviderError {
-    let (status, kind) = match err.status() {
-        Some(401 | 403) => (StatusCode::UNAUTHORIZED, ProviderErrorKind::Authentication),
-        Some(429) => (StatusCode::TOO_MANY_REQUESTS, ProviderErrorKind::RateLimit),
-        _ => (StatusCode::BAD_GATEWAY, ProviderErrorKind::Api),
-    };
-    ProviderError::new(status, kind, format!("Response decoding error: {err}"))
 }
 
 fn map_cursor_error_to_response(err: &client::CursorError) -> Response {

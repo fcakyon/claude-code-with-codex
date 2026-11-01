@@ -13,9 +13,9 @@
 
 use http_body_util::BodyExt;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static ENV_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 
 // ---------------------------------------------------------------------------
 // Prost roundtrip
@@ -40,6 +40,8 @@ fn prost_roundtrip_preserves_cursor_server_message() {
             }),
         }),
         exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
     let mut bytes = Vec::new();
     msg.encode(&mut bytes).unwrap();
@@ -82,6 +84,9 @@ fn prost_roundtrip_preserves_client_message() {
             conversation_group_id: String::new(),
             client_supports_inline_images: true,
         }),
+        exec_client_message: None,
+        kv_client_message: None,
+        exec_client_control_message: None,
         client_heartbeat: None,
     };
 
@@ -136,7 +141,7 @@ fn connect_frame_with_flags_decode() {
 
 #[test]
 fn auth_returns_token_from_env() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     unsafe {
         std::env::set_var("CCP_CURSOR_AUTH_TOKEN", "test-token-123");
     }
@@ -257,7 +262,6 @@ fn cursor_error_display_works() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[allow(clippy::await_holding_lock)]
 async fn cursor_client_sends_connect_proto_headers_and_run_request_frame() {
     use axum::{Router, routing::post};
     use claude_codex::providers::cursor::client::CursorHttpClient;
@@ -273,7 +277,7 @@ async fn cursor_client_sends_connect_proto_headers_and_run_request_frame() {
         body: Vec<u8>,
     }
 
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let observed: Arc<Mutex<Option<ObservedRequest>>> = Arc::new(Mutex::new(None));
     let observed_handler = Arc::clone(&observed);
 
@@ -290,6 +294,9 @@ async fn cursor_client_sends_connect_proto_headers_and_run_request_frame() {
                 }),
             }),
             exec_server_message: None,
+
+            conversation_checkpoint_update: None,
+            kv_server_message: None,
         };
         let mut payload = Vec::new();
         msg.encode(&mut payload).unwrap();
@@ -473,6 +480,8 @@ fn response_decode_extracts_text_and_usage() {
             turn_ended: None,
         }),
         exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
     let mut payload = Vec::new();
     msg.encode(&mut payload).unwrap();
@@ -491,6 +500,8 @@ fn response_decode_extracts_text_and_usage() {
             }),
         }),
         exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
     let mut payload = Vec::new();
     msg.encode(&mut payload).unwrap();
@@ -532,6 +543,8 @@ fn sse_parses_event_names_and_data() {
             turn_ended: None,
         }),
         exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
     let mut payload = Vec::new();
     msg.encode(&mut payload).unwrap();
@@ -549,6 +562,8 @@ fn sse_parses_event_names_and_data() {
             }),
         }),
         exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
     let mut payload = Vec::new();
     msg.encode(&mut payload).unwrap();
@@ -608,6 +623,8 @@ fn sse_message_delta_contains_usage() {
             }),
         }),
         exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
     let mut payload = Vec::new();
     msg.encode(&mut payload).unwrap();
@@ -678,7 +695,6 @@ fn registry_provider_for_legacy_cursor_model() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
     use axum::{Router, routing::post};
     use claude_codex::providers::cursor::connect::encode_connect_frame;
@@ -687,7 +703,7 @@ async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
     use claude_codex::providers::cursor::sse::frame_cursor_stream;
     use prost::Message;
 
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
 
     // Build mock upstream response bytes
     let mut body = Vec::new();
@@ -701,6 +717,8 @@ async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
             turn_ended: None,
         }),
         exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
     let mut payload = Vec::new();
     msg.encode(&mut payload).unwrap();
@@ -718,6 +736,8 @@ async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
             }),
         }),
         exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
     let mut payload = Vec::new();
     msg.encode(&mut payload).unwrap();
@@ -800,14 +820,13 @@ async fn cursor_provider_streams_text_and_usage_from_mock_upstream() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn cursor_provider_handle_messages_returns_anthropic_json() {
     use axum::{Router, routing::post};
     use claude_codex::providers::cursor::connect::encode_connect_frame;
     use claude_codex::providers::cursor::proto::*;
     use prost::Message;
 
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
 
     // Build mock response
     let mut body = Vec::new();
@@ -825,6 +844,8 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
             }),
         }),
         exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
     let mut payload = Vec::new();
     msg.encode(&mut payload).unwrap();
@@ -900,7 +921,6 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[allow(clippy::await_holding_lock)]
 async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
     use axum::{Router, routing::post};
     use claude_codex::providers::cursor::connect::{ConnectFrameDecoder, encode_connect_frame};
@@ -914,7 +934,7 @@ async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
         body: Vec<u8>,
     }
 
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let observed: Arc<Mutex<Option<ObservedRequest>>> = Arc::new(Mutex::new(None));
     let observed_handler = Arc::clone(&observed);
 
@@ -928,6 +948,9 @@ async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
                 turn_ended: None,
             }),
             exec_server_message: None,
+
+            conversation_checkpoint_update: None,
+            kv_server_message: None,
         };
         let mut text_payload = Vec::new();
         text_msg.encode(&mut text_payload).unwrap();
@@ -944,6 +967,9 @@ async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
                 }),
             }),
             exec_server_message: None,
+
+            conversation_checkpoint_update: None,
+            kv_server_message: None,
         };
         let mut usage_payload = Vec::new();
         usage_msg.encode(&mut usage_payload).unwrap();
@@ -1064,435 +1090,365 @@ async fn cursor_proxy_http_path_reaches_mock_cursor_upstream() {
 }
 
 // ---------------------------------------------------------------------------
-// Cursor tool bridge integration tests
+// Live run: one stream across a tool round trip
 // ---------------------------------------------------------------------------
 
-#[test]
-fn bridge_start_pauses_on_tool_use_xml() {
-    use claude_codex::providers::cursor::response::*;
-    use claude_codex::providers::cursor::tool_bridge::*;
+/// The regression this bridge exists for: after Claude Code runs the tool, the
+/// result has to travel back on the run that asked for it. A second `Run` makes
+/// the agent re-plan from scratch and re-issue the same call.
+#[tokio::test]
+async fn live_run_answers_the_tool_result_on_the_same_stream() {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::routing::post;
+    use claude_codex::providers::cursor::connect::{ConnectFrameDecoder, encode_connect_frame};
+    use claude_codex::providers::cursor::proto::*;
+    use futures_util::StreamExt;
+    use prost::Message;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Create upstream events with a text delta containing XML tool_use
-    let events = vec![
-        CursorStreamEvent::TextDelta {
-            text: "before ".to_string(),
-        },
-        CursorStreamEvent::TextDelta {
-            text: r#"<tool_use id="x" name="Read">{"file_path":"/tmp/a"}</tool_use>"#.to_string(),
-        },
-        CursorStreamEvent::TextDelta {
-            text: " after".to_string(),
-        },
-        CursorStreamEvent::Usage {
-            input_tokens: 10,
-            output_tokens: 5,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        },
-        CursorStreamEvent::End,
-    ];
+    let _guard = ENV_LOCK.lock().await;
+    let runs = Arc::new(AtomicUsize::new(0));
+    let replies: Arc<Mutex<Vec<ExecClientMessage>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let allowed: std::collections::BTreeSet<String> =
-        ["Read".to_string(), "Write".to_string(), "Bash".to_string()]
-            .into_iter()
-            .collect();
+    let app = {
+        let runs = Arc::clone(&runs);
+        let replies = Arc::clone(&replies);
+        Router::new().route(
+            "/agent.v1.AgentService/Run",
+            post(move |body: Body| async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                let replies = Arc::clone(&replies);
 
-    let mut counter = 0u64;
-    let id_factory = Box::new(move || {
-        counter += 1;
-        format!("call_cursor_test_{counter}")
+                tokio::spawn(async move {
+                    let mut decoder = ConnectFrameDecoder::new();
+                    let mut stream = body.into_data_stream();
+                    let mut asked = false;
+                    let mut answered = false;
+
+                    while let Some(Ok(chunk)) = stream.next().await {
+                        let frames = match decoder.push(&chunk) {
+                            Ok(frames) => frames,
+                            Err(_) => break,
+                        };
+                        if !asked && !frames.is_empty() {
+                            // The run request has landed: ask for a tool.
+                            asked = true;
+                            let _ = tx.send(Ok(exec_frame()));
+                        }
+                        for frame in frames {
+                            let message = match AgentClientMessage::decode(frame.payload.clone()) {
+                                Ok(message) => message,
+                                Err(_) => continue,
+                            };
+                            let Some(exec) = message.exec_client_message else {
+                                continue;
+                            };
+                            replies.lock().unwrap().push(exec);
+                            if !answered {
+                                answered = true;
+                                // The agent carries on with the result it got.
+                                let _ = tx.send(Ok(text_frame("the tool returned grok-ok")));
+                                let _ = tx.send(Ok(usage_frame(21, 7)));
+                                let _ = tx.send(Ok(encode_connect_frame(b"", 2)));
+                            }
+                        }
+                    }
+                });
+
+                let body =
+                    Body::from_stream(futures_util::stream::unfold(rx, |mut rx| async move {
+                        rx.recv().await.map(|item| {
+                            (
+                                item.map_err(|error: std::io::Error| {
+                                    std::io::Error::other(error.to_string())
+                                }),
+                                rx,
+                            )
+                        })
+                    }));
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/connect+proto",
+                    )],
+                    body,
+                )
+            }),
+        )
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
     });
 
-    let (sse, paused) = start_cursor_tool_bridge(
-        "msg_1",
-        "cursor-test",
-        "session-bridge-1",
-        &events,
-        Some(allowed),
-        id_factory,
-    );
+    unsafe {
+        std::env::set_var("CCP_CURSOR_BASE_URL", format!("http://{addr}"));
+        std::env::set_var("CCP_CURSOR_AUTH_TOKEN", "proxy-token");
+    }
 
-    assert!(paused, "bridge should pause on tool_use");
+    let provider = claude_codex::providers::cursor::CursorProvider::new();
+    let tools = serde_json::json!([
+        {"name": "Bash", "description": "run", "input_schema": {"type": "object"}},
+        {"name": "Read", "description": "read", "input_schema": {"type": "object"}},
+        {"name": "Write", "description": "write", "input_schema": {"type": "object"}}
+    ]);
 
-    let sse_str = String::from_utf8_lossy(&sse);
-    let parsed = parse_sse_events(&sse_str);
-
-    let event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
-    assert!(
-        event_names.contains(&"content_block_start"),
-        "expected content_block_start for tool_use"
-    );
-    assert!(
-        event_names.contains(&"message_stop"),
-        "expected message_stop"
-    );
-
-    let msg_delta = parsed
-        .iter()
-        .find(|(n, _)| n == "message_delta")
-        .map(|(_, d)| d.clone());
-    assert!(msg_delta.is_some(), "expected message_delta");
-    assert_eq!(
-        msg_delta.unwrap()["delta"]["stop_reason"],
-        "tool_use",
-        "stop_reason should be tool_use"
-    );
-
-    // Clean up
-    BridgeRegistry::remove("session-bridge-1");
-}
-
-#[test]
-fn bridge_start_passes_through_without_tool_use() {
-    use claude_codex::providers::cursor::response::*;
-    use claude_codex::providers::cursor::tool_bridge::*;
-
-    let events = vec![
-        CursorStreamEvent::TextDelta {
-            text: "hello world".to_string(),
-        },
-        CursorStreamEvent::Usage {
-            input_tokens: 5,
-            output_tokens: 1,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        },
-        CursorStreamEvent::End,
-    ];
-
-    let (sse, paused) = start_cursor_tool_bridge(
-        "msg_2",
-        "cursor-test",
-        "session-bridge-2",
-        &events,
-        None,
-        Box::new(|| "id".into()),
-    );
-
-    assert!(!paused, "bridge should NOT pause without tool_use");
-
-    let sse_str = String::from_utf8_lossy(&sse);
-    let parsed = parse_sse_events(&sse_str);
-    let event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
-
-    assert!(event_names.contains(&"message_start"));
-    assert!(event_names.contains(&"content_block_delta"));
-    assert!(event_names.contains(&"message_delta"));
-    assert!(event_names.contains(&"message_stop"));
-
-    // Verify stop_reason is end_turn
-    let msg_delta = parsed
-        .iter()
-        .find(|(n, _)| n == "message_delta")
-        .map(|(_, d)| d.clone());
-    assert_eq!(
-        msg_delta.unwrap()["delta"]["stop_reason"],
-        "end_turn",
-        "stop_reason should be end_turn without tool_use"
-    );
-}
-
-#[test]
-fn bridge_start_creates_pending_tool_in_registry() {
-    use claude_codex::providers::cursor::response::*;
-    use claude_codex::providers::cursor::tool_bridge::*;
-
-    // Clean state
-    BridgeRegistry::clear();
-
-    let events = vec![CursorStreamEvent::TextDelta {
-        text: r#"<tool_use name="Read">{"file_path":"/tmp/test"}</tool_use>"#.to_string(),
-    }];
-
-    let allowed: std::collections::BTreeSet<String> = ["Read".to_string()].into_iter().collect();
-
-    let (_, paused) = start_cursor_tool_bridge(
-        "msg_3",
-        "cursor-test",
-        "session-bridge-pt",
-        &events,
-        Some(allowed),
-        Box::new(|| "call_test".into()),
-    );
-
-    assert!(paused);
-
-    let pending = BridgeRegistry::pending_tool("session-bridge-pt");
-    assert!(pending.is_some(), "pending tool should be stored");
-    assert_eq!(pending.unwrap().name(), "Read");
-
-    BridgeRegistry::remove("session-bridge-pt");
-}
-
-#[test]
-fn bridge_resume_continues_after_tool_use_pause() {
-    use claude_codex::providers::cursor::response::*;
-    use claude_codex::providers::cursor::tool_bridge::*;
-
-    BridgeRegistry::clear();
-
-    // Events: tool_use in the middle, text after
-    let events = vec![
-        CursorStreamEvent::TextDelta {
-            text: "before ".to_string(),
-        },
-        CursorStreamEvent::TextDelta {
-            text: r#"<tool_use name="Read">{"file_path":"/tmp/a"}</tool_use>"#.to_string(),
-        },
-        CursorStreamEvent::TextDelta {
-            text: " continued".to_string(),
-        },
-        CursorStreamEvent::Usage {
-            input_tokens: 10,
-            output_tokens: 5,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        },
-        CursorStreamEvent::End,
-    ];
-
-    let allowed: std::collections::BTreeSet<String> = ["Read".to_string()].into_iter().collect();
-
-    let mut counter = 0u64;
-    let id_factory = Box::new(move || {
-        counter += 1;
-        format!("call_cursor_test_{counter}")
+    // Turn 1: the agent asks for a read.
+    let first = serde_json::json!({
+        "model": "cursor:gpt-5.5",
+        "stream": true,
+        "tools": tools,
+        "messages": [{"role": "user", "content": "read /etc/hostname"}]
     });
-
-    let (_first_sse, paused) = start_cursor_tool_bridge(
-        "msg_first",
-        "cursor-test",
-        "session-resume-1",
-        &events,
-        Some(allowed),
-        id_factory,
-    );
-    assert!(paused);
-
-    let body: claude_codex::MessagesRequest =
-        serde_json::from_value(serde_json::json!({
-            "model": "cursor-test",
-            "messages": [
-                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_cursor_test_1", "content": "result text"}]}
-            ]
-        }))
-        .unwrap();
-
-    let pending =
-        BridgeRegistry::pending_tool("session-resume-1").expect("should have pending tool");
-    assert_eq!(pending.tool_use_id(), "call_cursor_test_1");
-
-    let result = find_tool_result(&body, pending.tool_use_id()).expect("should find tool result");
-
-    let (result_msgs, second_sse) = resume_cursor_tool_bridge(
-        "session-resume-1",
-        "msg_second",
-        "cursor-test",
-        result,
-        &pending,
-    );
-
-    assert!(!result_msgs.is_empty(), "should have result messages");
-
-    let sse_str = String::from_utf8_lossy(&second_sse);
-    let parsed = parse_sse_events(&sse_str);
-    let event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
-
-    assert!(
-        event_names.contains(&"message_start"),
-        "resume should have message_start in {event_names:?}"
-    );
-    assert!(
-        event_names.contains(&"message_stop"),
-        "resume should have message_stop in {event_names:?}"
-    );
-
-    let text_deltas: Vec<&str> = parsed
+    let first_sse = collect_sse(&provider, first, "probe-loop-1").await;
+    let first_events = parse_sse_events(&first_sse);
+    let tool_use_id = first_events
         .iter()
-        .filter_map(|(n, d)| {
-            if n == "content_block_delta" {
-                d["delta"]["text"].as_str()
-            } else {
-                None
-            }
+        .find_map(|(name, data)| {
+            (name == "content_block_start" && data["content_block"]["type"] == "tool_use").then(
+                || {
+                    data["content_block"]["id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string()
+                },
+            )
         })
-        .collect();
-    let combined = text_deltas.join("");
-    assert!(
-        combined.contains("continued"),
-        "resume should include remaining text deltas"
+        .expect("turn 1 asks for a tool");
+    assert_eq!(
+        first_events
+            .iter()
+            .find(|(name, _)| name == "message_delta")
+            .map(|(_, data)| data["delta"]["stop_reason"].clone()),
+        Some(serde_json::json!("tool_use"))
     );
 
-    BridgeRegistry::remove("session-resume-1");
-}
+    // Turn 2: Claude Code answers with the tool result.
+    let second = serde_json::json!({
+        "model": "cursor:gpt-5.5",
+        "stream": true,
+        "tools": tools,
+        "messages": [
+            {"role": "user", "content": "read /etc/hostname"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": tool_use_id, "name": "Read",
+                 "input": {"file_path": "/etc/hostname"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tool_use_id, "content": "grok-ok"}
+            ]}
+        ]
+    });
+    let second_sse = collect_sse(&provider, second, "probe-loop-1").await;
+    let second_events = parse_sse_events(&second_sse);
 
-#[test]
-fn bridge_rejects_tool_not_in_allowed_list() {
-    use claude_codex::providers::cursor::response::*;
-    use claude_codex::providers::cursor::tool_bridge::*;
-
-    BridgeRegistry::clear();
-
-    let events = vec![CursorStreamEvent::TextDelta {
-        text: r#"<tool_use name="Bash">{"command":"pwd"}</tool_use>"#.to_string(),
-    }];
-
-    let allowed: std::collections::BTreeSet<String> = ["Read".to_string()].into_iter().collect();
-
-    let (sse, paused) = start_cursor_tool_bridge(
-        "msg_filter",
-        "cursor-test",
-        "session-filter-1",
-        &events,
-        Some(allowed),
-        Box::new(|| "id".into()),
-    );
-
-    assert!(!paused, "should NOT pause for disallowed tool");
-
-    let sse_str = String::from_utf8_lossy(&sse);
-    let parsed = parse_sse_events(&sse_str);
-    let _event_names: Vec<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
-
-    let msg_delta = parsed
+    let text: String = second_events
         .iter()
-        .find(|(n, _)| n == "message_delta")
-        .map(|(_, d)| d.clone());
-    assert_eq!(
-        msg_delta.unwrap()["delta"]["stop_reason"],
-        "end_turn",
-        "disallowed tool should not trigger tool_use"
-    );
-
-    BridgeRegistry::remove("session-filter-1");
-}
-
-#[test]
-fn bridge_result_messages_have_correct_read_shape() {
-    use claude_codex::providers::cursor::tool_bridge::*;
-
-    let exec = CursorExec {
-        id: Some(42),
-        exec_id: None,
-        args: serde_json::json!({"file_path": "/tmp/readme.txt"}),
-    };
-    let result = CursorNativeToolResult {
-        content: "file contents here".into(),
-        is_error: false,
-    };
-
-    let msg = build_read_result_from_native(&exec, &result);
-    let msg_obj = msg.as_object().unwrap();
-
-    assert_eq!(msg_obj.get("id").and_then(|v| v.as_i64()), Some(42));
-
-    let read_result = msg_obj.get("readResult").unwrap();
-    assert!(read_result.get("success").is_some());
-    let success = read_result.get("success").unwrap();
-    assert_eq!(
-        success.get("path").and_then(|v| v.as_str()),
-        Some("/tmp/readme.txt")
-    );
-    assert_eq!(
-        success.get("content").and_then(|v| v.as_str()),
-        Some("file contents here")
-    );
-    assert_eq!(success.get("totalLines").and_then(|v| v.as_i64()), Some(1));
-}
-
-#[test]
-fn bridge_result_messages_have_correct_write_shape() {
-    use claude_codex::providers::cursor::tool_bridge::*;
-
-    let exec = CursorExec {
-        id: Some(99),
-        exec_id: Some("exec-write-1".into()),
-        args: serde_json::json!({"file_path": "/tmp/writeme.txt", "content": "data"}),
-    };
-
-    let result = CursorNativeToolResult {
-        content: "written".into(),
-        is_error: false,
-    };
-    let msg = build_write_result_from_native(&exec, &result);
-    let msg_obj = msg.as_object().unwrap();
-    assert_eq!(
-        msg_obj.get("execId").and_then(|v| v.as_str()),
-        Some("exec-write-1")
-    );
-    let write_result = msg_obj.get("writeResult").unwrap();
-    let success = write_result.get("success").unwrap();
-    assert_eq!(
-        success.get("path").and_then(|v| v.as_str()),
-        Some("/tmp/writeme.txt")
-    );
-    assert!(success.get("linesCreated").is_some());
-    assert!(success.get("fileSize").is_some());
-
-    let error_result = CursorNativeToolResult {
-        content: "permission denied".into(),
-        is_error: true,
-    };
-    let err_msg = build_write_result_from_native(&exec, &error_result);
-    let err_obj = err_msg.as_object().unwrap();
-    let write_result = err_obj.get("writeResult").unwrap();
-    let error = write_result.get("error").unwrap();
-    assert_eq!(
-        error.get("path").and_then(|v| v.as_str()),
-        Some("/tmp/writeme.txt")
+        .filter(|(name, _)| name == "content_block_delta")
+        .filter_map(|(_, data)| data["delta"]["text"].as_str())
+        .collect();
+    assert!(
+        text.contains("the tool returned grok-ok"),
+        "turn 2 must carry the final answer, got {second_sse}"
     );
     assert!(
-        error
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .contains("permission")
+        !second_events
+            .iter()
+            .any(|(name, data)| name == "content_block_start"
+                && data["content_block"]["type"] == "tool_use"),
+        "turn 2 re-issued the tool call instead of using the result: {second_sse}"
     );
+
+    // The whole round trip happened on ONE run, and the reply carried the exec
+    // ids the agent gave us.
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "a second Run was started");
+    let replies = replies.lock().unwrap().clone();
+    assert_eq!(replies.len(), 1, "one exec reply");
+    assert_eq!(replies[0].id, 1);
+    assert_eq!(replies[0].exec_id, "exec-1");
+    assert!(matches!(
+        replies[0].message,
+        Some(exec_client_message::Message::ReadResult(_))
+    ));
+
+    unsafe {
+        std::env::remove_var("CCP_CURSOR_BASE_URL");
+        std::env::remove_var("CCP_CURSOR_AUTH_TOKEN");
+    }
 }
 
-#[test]
-fn bridge_shell_stream_result_has_correct_shape() {
-    use claude_codex::providers::cursor::tool_bridge::*;
+/// A text-only turn still ends on the upstream's own end frame.
+#[tokio::test]
+async fn live_run_still_answers_plain_turns() {
+    use axum::Router;
+    use axum::routing::post;
+    use claude_codex::providers::cursor::connect::encode_connect_frame;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let exec = CursorExec {
-        id: Some(7),
-        exec_id: Some("exec-shell".into()),
-        args: serde_json::json!({}),
+    let _guard = ENV_LOCK.lock().await;
+    let runs = Arc::new(AtomicUsize::new(0));
+
+    let app = {
+        let runs = Arc::clone(&runs);
+        Router::new().route(
+            "/agent.v1.AgentService/Run",
+            post(move |_body: axum::body::Body| async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                let mut body = text_frame("plain answer").to_vec();
+                body.extend_from_slice(&usage_frame(9, 2));
+                body.extend_from_slice(&encode_connect_frame(b"", 2));
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/connect+proto",
+                    )],
+                    body,
+                )
+            }),
+        )
     };
 
-    let result = CursorNativeToolResult {
-        content: "stdout output".into(),
-        is_error: false,
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    unsafe {
+        std::env::set_var("CCP_CURSOR_BASE_URL", format!("http://{addr}"));
+        std::env::set_var("CCP_CURSOR_AUTH_TOKEN", "proxy-token");
+    }
+
+    let provider = claude_codex::providers::cursor::CursorProvider::new();
+    let sse = collect_sse(
+        &provider,
+        serde_json::json!({
+            "model": "cursor:gpt-5.5",
+            "stream": true,
+            "tools": [{"name": "Read", "description": "read", "input_schema": {}}],
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+        "probe-plain-1",
+    )
+    .await;
+
+    let events = parse_sse_events(&sse);
+    let text: String = events
+        .iter()
+        .filter(|(name, _)| name == "content_block_delta")
+        .filter_map(|(_, data)| data["delta"]["text"].as_str())
+        .collect();
+    assert_eq!(text, "plain answer");
+    assert!(events.iter().any(|(name, _)| name == "message_stop"));
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    unsafe {
+        std::env::remove_var("CCP_CURSOR_BASE_URL");
+        std::env::remove_var("CCP_CURSOR_AUTH_TOKEN");
+    }
+}
+
+/// Call the provider the way the proxy does and collect the whole SSE body.
+async fn collect_sse(
+    provider: &claude_codex::providers::cursor::CursorProvider,
+    body: serde_json::Value,
+    session_id: &str,
+) -> String {
+    use claude_codex::provider::{Provider, RequestContext};
+
+    let request: claude_codex::MessagesRequest = serde_json::from_value(body).unwrap();
+    let response = provider
+        .handle_messages(
+            request,
+            RequestContext {
+                req_id: format!("test-{session_id}"),
+                session_id: Some(session_id.to_string()),
+                session_seq: None,
+                provider: "cursor".to_string(),
+                traffic: None,
+                monitor: None,
+                passthrough: None,
+            },
+        )
+        .await;
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect sse")
+        .to_bytes();
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+/// The frame the agent asks a tool in: AgentServerMessage tag 2 ->
+/// ExecServerMessage id 1, read_args tag 7, exec_id tag 15.
+fn exec_frame() -> bytes::Bytes {
+    use claude_codex::providers::cursor::connect::encode_connect_frame;
+    use claude_codex::providers::cursor::proto::*;
+    use prost::Message;
+
+    let message = AgentServerMessage {
+        interaction_update: None,
+        exec_server_message: Some(ExecServerMessage {
+            id: Some(1),
+            exec_id: Some("exec-1".to_string()),
+            read_args: Some(ReadArgs {
+                path: "/etc/hostname".to_string(),
+                tool_call_id: Some("tool_abc".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
     };
+    encode_connect_frame(message.encode_to_vec(), 0)
+}
 
-    let messages = build_shell_stream_result(
-        &exec,
-        &result,
-        std::time::Duration::from_millis(150),
-        "/home/user",
-    );
+fn text_frame(text: &str) -> bytes::Bytes {
+    use claude_codex::providers::cursor::connect::encode_connect_frame;
+    use claude_codex::providers::cursor::proto::*;
+    use prost::Message;
 
-    assert_eq!(messages.len(), 4, "start + stdout + exit + close");
+    let message = AgentServerMessage {
+        interaction_update: Some(InteractionUpdate {
+            text_delta: Some(TextDelta {
+                text: text.to_string(),
+            }),
+            ..Default::default()
+        }),
+        exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
+    };
+    encode_connect_frame(message.encode_to_vec(), 0)
+}
 
-    assert!(
-        messages[0]
-            .get("shellStream")
-            .and_then(|s| s.get("start"))
-            .is_some()
-    );
+fn usage_frame(input: u64, output: u64) -> bytes::Bytes {
+    use claude_codex::providers::cursor::connect::encode_connect_frame;
+    use claude_codex::providers::cursor::proto::*;
+    use prost::Message;
 
-    assert_eq!(
-        messages[1]["shellStream"]["stdout"]["data"],
-        "stdout output"
-    );
-
-    assert_eq!(messages[2]["shellStream"]["exit"]["code"], 0);
-    assert_eq!(messages[2]["shellStream"]["exit"]["cwd"], "/home/user");
-
-    assert_eq!(
-        messages[3]["execClientControlMessage"]["streamClose"]["id"],
-        7
-    );
+    let message = AgentServerMessage {
+        interaction_update: Some(InteractionUpdate {
+            turn_ended: Some(TurnEnded {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            }),
+            ..Default::default()
+        }),
+        exec_server_message: None,
+        conversation_checkpoint_update: None,
+        kv_server_message: None,
+    };
+    encode_connect_frame(message.encode_to_vec(), 0)
 }
 
 // ---------------------------------------------------------------------------

@@ -9,6 +9,17 @@ pub struct CursorSelectedImage {
     pub mime_type: String,
 }
 
+/// How the model calls a tool from `<tools>`. Without it the agent only knows
+/// its own built-in tools: it tried MCP tools and ToolSearch on Cursor's
+/// channel, and Cursor answered "Tool not available" (measured 13/10). The
+/// format is the one `tool_use_xml` parses and the transcript already uses.
+const TOOL_PROTOCOL: &str = "These tools run on the user's machine and are available in this \
+session, although they are not in your built-in tool list. To read files, write files or \
+run shell commands, use your built-in tools. To call any other tool listed here, write the \
+call as text, exactly in this form, and stop: \
+<tool_use name=\"TOOL_NAME\">{\"param\": \"value\"}</tool_use> \
+The result comes back as <tool_result>. Never call these tools through your built-in tool channel.";
+
 /// Render the full Cursor prompt from an Anthropic MessagesRequest.
 ///
 /// Includes:
@@ -35,6 +46,7 @@ pub fn render_cursor_prompt(req: &MessagesRequest) -> String {
     {
         let tool_lines: Vec<String> = tools
             .iter()
+            .filter(|t| t.get("name").and_then(|n| n.as_str()) != Some("DeferredToolPlaceholder"))
             .map(|t| {
                 let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let description = t.get("description").and_then(|d| d.as_str()).unwrap_or("");
@@ -51,7 +63,10 @@ pub fn render_cursor_prompt(req: &MessagesRequest) -> String {
             })
             .collect();
         if !tool_lines.is_empty() {
-            sections.push(format!("<tools>\n{}\n</tools>", tool_lines.join("\n")));
+            sections.push(format!(
+                "<tools>\n{TOOL_PROTOCOL}\n\n{}\n</tools>",
+                tool_lines.join("\n")
+            ));
         }
     }
 
@@ -228,6 +243,13 @@ fn render_tool_result_block(block: &serde_json::Value) -> Option<String> {
     let block_type = block.get("type").and_then(|t| t.as_str())?;
     match block_type {
         "text" | "image" | "tool_use" | "tool_result" | "thinking" => render_block(block),
+        // Tool search: the harness answers ToolSearch with a reference and puts
+        // the tool's schema in the request's `tools`, where the prompt's
+        // <tools> section already carries it.
+        "tool_reference" => {
+            let name = block.get("tool_name").and_then(|n| n.as_str())?;
+            Some(format!("Tool loaded: {name} (its schema is in <tools>)."))
+        }
         _ => {
             let type_str = block_type.to_string();
             Some(format!("[unsupported tool result block: {type_str}]"))
@@ -333,6 +355,7 @@ mod tests {
         .unwrap();
         let rendered = render_cursor_prompt(&req);
         assert!(rendered.contains("<tools>"));
+        assert!(rendered.contains(r#"<tool_use name="TOOL_NAME">"#));
         assert!(rendered.contains("Read"));
     }
 
@@ -514,5 +537,28 @@ mod tests {
         .unwrap();
         let rendered = render_cursor_prompt(&req);
         assert!(rendered.contains("<web_search_tool_result tool_use_id=\"ws1\">"));
+    }
+
+    #[test]
+    fn tool_search_reference_renders_as_a_loaded_tool_and_the_placeholder_is_hidden() {
+        let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model": "cursor:grok-4.7",
+            "max_tokens": 16,
+            "messages": [
+                {"role": "user", "content": "use whoami"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "ToolSearch", "input": {"query": "select:whoami"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "tool_reference", "tool_name": "mcp__x__whoami"}]}]}
+            ],
+            "tools": [
+                {"name": "DeferredToolPlaceholder", "description": "", "input_schema": {"type": "object"}, "defer_loading": true},
+                {"name": "mcp__x__whoami", "description": "who", "input_schema": {"type": "object"}, "defer_loading": true}
+            ]
+        }))
+        .unwrap();
+        let rendered = render_cursor_prompt(&req);
+        assert!(rendered.contains("Tool loaded: mcp__x__whoami"));
+        assert!(!rendered.contains("unsupported tool result block"));
+        assert!(!rendered.contains("DeferredToolPlaceholder"));
+        assert!(rendered.contains("\"name\":\"mcp__x__whoami\""));
     }
 }

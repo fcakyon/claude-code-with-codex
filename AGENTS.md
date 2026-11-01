@@ -27,8 +27,9 @@ changes made on top of it.
 - `src/registry.rs` picks a provider for each request. `claude-*` and the opus
   and sonnet aliases resolve to the Anthropic passthrough; other ids match a
   backend exactly; an unknown id returns a 400 that lists the supported ids.
-  Codex ids come from `model_allowlist::ALLOWED_MODELS`: the bundled list
-  plus the listed, API-capable slugs in the Codex CLI's `models_cache.json`.
+  Codex ids come from `model_allowlist::ALLOWED_MODELS` plus the listed,
+  API-capable slugs that `model_catalog` rereads from the Codex CLI's
+  `models_cache.json`.
 - `src/providers/anthropic/mod.rs` is the passthrough. It relays the original
   body and headers to `api.anthropic.com` and streams the reply back. It holds
   no Anthropic credentials.
