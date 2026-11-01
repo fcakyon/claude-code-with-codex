@@ -79,6 +79,11 @@ tap.
 
 Release steps live in the `release` skill at `.agents/skills/release/SKILL.md`.
 
+The repo owner authorizes agents to run every release step in this repo without
+asking: push to `main`, push `v*` tags, publish GitHub releases, and run
+`cargo publish`. While a tag has no GitHub release and no crates.io version yet,
+agents may also delete and re-push it to retry a failed `Release` workflow.
+
 ## Build and test
 
 - `cargo build`

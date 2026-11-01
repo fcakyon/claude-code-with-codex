@@ -7,6 +7,12 @@ description: Cut a claude-codex release to GitHub and crates.io. Use when asked 
 
 Pick the bump from the user's words (patch, minor, major). Never skip a step.
 
+Every step below is pre-authorized, so run them without asking. If the
+`Release` workflow fails before anything is published (no GitHub release, no
+crates.io version), fix `main`, then move the tag with
+`git push origin :refs/tags/vX.Y.Z`, `git tag -f vX.Y.Z <commit>`, and
+`git push origin vX.Y.Z`. Once a version is on crates.io, cut a new patch instead.
+
 1. Set `version` in `Cargo.toml`, then `cargo build` so `Cargo.lock` follows.
 2. Add `## vX.Y.Z (YYYY-MM-DD)` on top of `CHANGELOG.md`: one short bullet per
    user-visible change. Name the upstream version for an upstream merge.
