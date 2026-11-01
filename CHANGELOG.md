@@ -1,3 +1,35 @@
+## v0.8.0 (2026-11-02)
+
+- Merge upstream claude-code-proxy v0.1.46 through v0.1.48.
+- Codex adds `gpt-6.1-terra` and `gpt-6.1-terra-fast`.
+  ([#197](https://github.com/raine/claude-code-proxy/pull/197))
+- The Codex CLI model catalog is reread while the proxy runs, so a model your
+  plan gains works without a restart. Its Responses Lite flag now decides the
+  lane for models the proxy does not know yet.
+  ([#130](https://github.com/raine/claude-code-proxy/pull/130))
+- `CCP_CODEX_FULL_LANE=1` enables parallel tool calls on Sol, Terra, and Astra
+  models. Off by default.
+  ([#77](https://github.com/raine/claude-code-proxy/pull/77))
+- Codex falls back to HTTP when a WebSocket setup fails before the request is
+  sent, unless a transport is set explicitly.
+  ([#173](https://github.com/raine/claude-code-proxy/pull/173))
+- A Codex turn that ends without text after every tool call succeeded now ends
+  normally after one retry instead of failing.
+  ([#122](https://github.com/raine/claude-code-proxy/pull/122))
+- Codex usage reports reasoning tokens and subscription quota usage.
+  ([#149](https://github.com/raine/claude-code-proxy/pull/149))
+- Continuing a message thread on a translated backend is rejected so Claude Code
+  resends the full history. Claude models still get the thread untouched.
+  ([#191](https://github.com/raine/claude-code-proxy/pull/191))
+- Cursor models run file and shell tools across turns without repeating calls,
+  get instructions for MCP tools, and accept effort variants.
+  ([#179](https://github.com/raine/claude-code-proxy/pull/179),
+  [#193](https://github.com/raine/claude-code-proxy/pull/193))
+- Grok no longer fails with HTTP 502 on an outdated client version, and Grok and
+  Cursor browser login on Windows keep the full login URL.
+  ([#180](https://github.com/raine/claude-code-proxy/issues/180),
+  [#192](https://github.com/raine/claude-code-proxy/pull/192))
+
 ## v0.7.0 (2026-10-19)
 
 - With `ENABLE_TOOL_SEARCH=true`, Codex gets each MCP tool where `ToolSearch`
